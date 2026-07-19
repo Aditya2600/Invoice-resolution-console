@@ -2,6 +2,7 @@ import type {
   ImportPurchaseOrdersResponse,
   JobDetail,
   JobListItem,
+  OpsOverview,
   PurchaseOrder,
   RetryJobRequest,
   RetryJobResponse,
@@ -90,6 +91,7 @@ export function uploadInvoiceWithProgress(
 }
 
 export const api = {
+  opsOverview: (windowHours = 24) => request<OpsOverview>(`/ops/overview?window_hours=${windowHours}`),
   listJobs: (limit = 200) => request<{ jobs: JobListItem[] }>(`/jobs?limit=${limit}`).then((body) => body.jobs),
   getJob: (jobId: string) => request<JobDetail>(`/jobs/${jobId}`),
   reviewCandidates: (jobId: string) =>

@@ -11,13 +11,13 @@ from app.pipeline import review
 from tests.test_finalization import extraction
 
 
-def needs_review_job(make_job) -> tuple[str, str]:
+def needs_review_job(make_job, invoice_number: str = "GLX-1") -> tuple[str, str]:
     job_id, document_id = make_job()
     repository.finalize_invoice_decision(
         job_id=job_id,
         document_id=document_id,
         decision_status="NEEDS_REVIEW",
-        extraction=extraction("100"),
+        extraction={**extraction("100"), "invoice_number": invoice_number},
         matched_po=None,
         reasons=["Multiple open purchase orders match this vendor; a reviewer must choose one."],
         rule_checks={"purchase_order_match": {"passed": False, "candidates": []}},

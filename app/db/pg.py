@@ -172,6 +172,12 @@ ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS manual_retry_count INTEGER NOT
 ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
 ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_by TEXT;
 
+-- The operations overview slices events by stage and by failure inside a time window; without
+-- these it degrades to a sequential scan of the whole event log as history grows.
+CREATE INDEX IF NOT EXISTS idx_invoice_events_stage_ts ON invoice_events (stage, ts);
+CREATE INDEX IF NOT EXISTS idx_invoice_events_status_ts ON invoice_events (status, ts);
+CREATE INDEX IF NOT EXISTS idx_invoice_jobs_updated ON invoice_jobs (updated_at);
+
 ALTER TABLE invoice_results ADD COLUMN IF NOT EXISTS policy_snapshot JSONB;
 ALTER TABLE invoice_results ADD COLUMN IF NOT EXISTS policy_hash TEXT;
 

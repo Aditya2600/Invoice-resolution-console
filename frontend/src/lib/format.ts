@@ -1,5 +1,12 @@
 import type { DecisionStatus, InvoiceEvent, JobStatus } from "./types";
-import { STAGE_LABELS, STAGE_ORDER, type StageName } from "./types";
+import {
+  FRIENDLY_STAGE_LABELS,
+  FRIENDLY_STAGE_OF,
+  FRIENDLY_STAGE_ORDER,
+  STAGE_LABELS,
+  type FriendlyStage,
+  type StageName,
+} from "./types";
 
 export function formatDateTime(value?: string | null) {
   if (!value) return "—";
@@ -63,32 +70,58 @@ export function formatRelative(value?: string | null) {
 }
 
 export interface StageState {
-  stage: StageName;
+  stage: FriendlyStage;
   label: string;
+  /** Every internal event that landed in this stage, for the Technical details pane. */
+  events: InvoiceEvent[];
+  /** The last one, which is what the rail reads its duration and status from. */
   event: InvoiceEvent | null;
   state: "done" | "active" | "pending" | "skipped";
 }
 
 /**
- * The worker emits stages in a fixed order but skips optional ones (OCR fallback
- * only fires for weak native text), so the timeline is the canonical order
- * annotated with whichever events actually landed.
+ * The rail an operator watches: eight friendly stages, not the eleven internal ones. Several
+ * internal stages fold into one row (native text and the OCR fallback are both "Text extracted"),
+ * and optional stages that never ran leave their row empty rather than inventing progress.
  */
 export function buildTimeline(events: InvoiceEvent[], jobStatus: JobStatus): StageState[] {
-  const byStage = new Map<StageName, InvoiceEvent>();
+  const byStage = new Map<FriendlyStage, InvoiceEvent[]>();
   for (const event of events) {
-    const stage = event.stage as StageName;
-    if (STAGE_LABELS[stage] && !byStage.has(stage)) byStage.set(stage, event);
+    const friendly = FRIENDLY_STAGE_OF[event.stage as StageName];
+    if (!friendly) continue;
+    byStage.set(friendly, [...(byStage.get(friendly) ?? []), event]);
   }
-  const lastSeen = STAGE_ORDER.reduce((max, stage, index) => (byStage.has(stage) ? index : max), -1);
+  const lastSeen = FRIENDLY_STAGE_ORDER.reduce(
+    (max, stage, index) => (byStage.has(stage) ? index : max),
+    -1,
+  );
 
-  return STAGE_ORDER.map((stage, index) => {
-    const event = byStage.get(stage) ?? null;
+  return FRIENDLY_STAGE_ORDER.map((stage, index) => {
+    const stageEvents = byStage.get(stage) ?? [];
     let state: StageState["state"];
-    if (event) state = "done";
+    if (stageEvents.length > 0) state = "done";
     else if (index === lastSeen + 1 && isRunning(jobStatus)) state = "active";
     else if (!isRunning(jobStatus)) state = "skipped";
     else state = "pending";
-    return { stage, label: STAGE_LABELS[stage], event, state };
+    return {
+      stage,
+      label: FRIENDLY_STAGE_LABELS[stage],
+      events: stageEvents,
+      event: stageEvents[stageEvents.length - 1] ?? null,
+      state,
+    };
   });
+}
+
+/**
+ * One sentence for the header. A failure is what an operator needs first; otherwise the newest
+ * reason the worker wrote, which is already written for a human. Never invented — an event with
+ * no reason produces no message rather than a filler line.
+ */
+export function latestMessage(events: InvoiceEvent[], jobStatus: JobStatus): string | null {
+  const failure = [...events].reverse().find((event) => event.status === "FAIL" && event.reason);
+  if (failure) return failure.reason;
+  const latest = [...events].reverse().find((event) => event.reason);
+  if (latest) return latest.reason;
+  return isRunning(jobStatus) ? "Waiting for a worker to pick this up." : null;
 }

@@ -6,11 +6,30 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useResolveReview, useReviewCandidates } from "@/hooks/queries";
 import { formatMoney } from "@/lib/format";
-import type { JobDetail, PurchaseOrder, ReviewAction } from "@/lib/types";
+import type { InvoiceExtraction, JobDetail, PurchaseOrder, ReviewAction } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 function remaining(po: PurchaseOrder) {
   return String(Number(po.total_amount) - Number(po.consumed_amount));
+}
+
+/** Exactly the fields the API accepts as corrections; anything else is refused with 422. */
+const CORRECTABLE = [
+  ["vendor_name", "Vendor", "text"],
+  ["invoice_number", "Invoice no.", "text"],
+  ["invoice_date", "Invoice date", "date"],
+  ["po_number", "PO number", "text"],
+  ["currency", "Currency", "text"],
+  ["subtotal", "Subtotal", "text"],
+  ["tax", "Tax", "text"],
+  ["total", "Total", "text"],
+] as const;
+
+type CorrectableField = (typeof CORRECTABLE)[number][0];
+
+function modelValue(extraction: InvoiceExtraction | undefined, field: CorrectableField) {
+  const value = extraction?.[field];
+  return value == null ? "" : String(value);
 }
 
 /** The reasons the pipeline recorded, plus every rule check that actually failed. */
@@ -33,12 +52,20 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
   const [note, setNote] = useState("");
   const [selectedPo, setSelectedPo] = useState<string | null>(result?.matched_po?.po_number ?? null);
   const [pending, setPending] = useState<ReviewAction | null>(null);
+  const [edits, setEdits] = useState<Partial<Record<CorrectableField, string>>>({});
 
   const candidates = useReviewCandidates(job.job_id, true);
   const resolve = useResolveReview(job.job_id);
   const problems = failures(detail);
   const extraction = result?.extraction;
-  const currency = result?.matched_po?.currency ?? extraction?.currency;
+
+  /** Only fields the reviewer actually changed are sent; the rest keep the model's reading. */
+  const corrections = Object.fromEntries(
+    CORRECTABLE.map(([field]) => [field, (edits[field] ?? "").trim()]).filter(
+      ([field, value]) => value !== "" && value !== modelValue(extraction, field as CorrectableField),
+    ),
+  ) as Record<string, string>;
+  const changedCount = Object.keys(corrections).length;
 
   const canSubmit = reviewer.trim().length > 0 && note.trim().length > 0 && !resolve.isPending;
 
@@ -50,6 +77,7 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
         reviewer_name: reviewer.trim(),
         note: note.trim(),
         selected_po_number: action === "APPROVE" ? selectedPo : null,
+        corrections: changedCount > 0 ? corrections : null,
       },
       {
         onSuccess: (data) => toast.success(data.message),
@@ -71,36 +99,63 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
         Resolve this invoice
       </h2>
 
-      <div className="mt-5 grid gap-5 md:grid-cols-2">
-          <div>
-            <div className="mono-label text-muted-foreground">WHY IT STOPPED</div>
-            <ul className="mt-2 space-y-1.5 text-sm text-foreground/80">
-              {problems.reasons.map((reason) => (
-                <li key={reason} className="flex gap-2">
-                  <XCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
-                  {reason}
-                </li>
-              ))}
-              {problems.reasons.length === 0 && <li>The run needs a human confirmation before payment.</li>}
-            </ul>
-            {problems.checks.length > 0 && (
-              <p className="mt-3 text-xs text-muted-foreground">Failed checks: {problems.checks.join(", ")}</p>
-            )}
-          </div>
+      <div className="mt-5">
+        <div className="mono-label text-muted-foreground">WHY IT STOPPED</div>
+        <ul className="mt-2 space-y-1.5 text-sm text-foreground/80">
+          {problems.reasons.map((reason) => (
+            <li key={reason} className="flex gap-2">
+              <XCircle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+              {reason}
+            </li>
+          ))}
+          {problems.reasons.length === 0 && <li>The run needs a human confirmation before payment.</li>}
+        </ul>
+        {problems.checks.length > 0 && (
+          <p className="mt-3 text-xs text-muted-foreground">Failed checks: {problems.checks.join(", ")}</p>
+        )}
+      </div>
 
-          <div>
-            <div className="mono-label text-muted-foreground">EXTRACTED</div>
-            <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1.5 text-sm">
-              <dt className="text-muted-foreground">Vendor</dt>
-              <dd className="truncate">{extraction?.vendor_name ?? "—"}</dd>
-              <dt className="text-muted-foreground">Invoice no.</dt>
-              <dd className="truncate">{extraction?.invoice_number ?? "—"}</dd>
-              <dt className="text-muted-foreground">PO on invoice</dt>
-              <dd className="truncate">{extraction?.po_number ?? "—"}</dd>
-              <dt className="text-muted-foreground">Total</dt>
-              <dd>{formatMoney(extraction?.total, currency)}</dd>
-            </dl>
-          </div>
+      <div className="mt-6">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div className="mono-label text-muted-foreground">EXTRACTED VALUE → YOUR CORRECTION</div>
+          {changedCount > 0 && (
+            <span className="text-xs font-medium">
+              {changedCount} field{changedCount === 1 ? "" : "s"} corrected
+            </span>
+          )}
+        </div>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          Leave a box empty to keep what the model read. The model's own reading is never overwritten.
+        </p>
+        <div className="mt-3 flex flex-col gap-1.5">
+          {CORRECTABLE.map(([field, label, type]) => {
+            const original = modelValue(extraction, field);
+            const value = edits[field] ?? "";
+            const changed = value.trim() !== "" && value.trim() !== original;
+            return (
+              <label
+                key={field}
+                className={cn(
+                  "grid items-center gap-2 rounded-xl border px-3 py-2 sm:grid-cols-[9rem_minmax(0,1fr)_minmax(0,1fr)]",
+                  changed ? "border-foreground bg-background" : "border-transparent",
+                )}
+              >
+                <span className="text-sm text-muted-foreground">{label}</span>
+                <span className={cn("truncate text-sm tabular-nums", changed && "line-through opacity-60")}>
+                  {original || "—"}
+                </span>
+                <Input
+                  type={type}
+                  className="h-9 bg-background"
+                  value={value}
+                  onChange={(event) => setEdits((current) => ({ ...current, [field]: event.target.value }))}
+                  placeholder={original || "Not found on the invoice"}
+                  aria-label={`Corrected ${label}`}
+                />
+              </label>
+            );
+          })}
+        </div>
       </div>
 
       <div className="mt-6">
@@ -199,18 +254,35 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
 /** Read-only trail for jobs a reviewer already resolved. */
 export function ReviewHistory({ detail }: { detail: JobDetail }) {
   if (detail.review_actions.length === 0) return null;
+  const original = detail.result?.extraction;
   return (
     <div className="mt-6 rounded-2xl border border-divider p-5">
       <div className="mono-label text-muted-foreground">HUMAN REVIEW</div>
       <ul className="mt-3 space-y-3 text-sm">
-        {detail.review_actions.map((action) => (
-          <li key={action.id}>
-            <span className="font-medium">{action.reviewer_name}</span>{" "}
-            {action.action === "APPROVE" ? "approved" : "rejected"} this invoice
-            {action.selected_po_number ? ` on ${action.selected_po_number}` : ""}.
-            <p className="text-muted-foreground">{action.note}</p>
-          </li>
-        ))}
+        {detail.review_actions.map((action) => {
+          const corrected = Object.entries(action.corrections ?? {}).filter(([, value]) => value != null);
+          return (
+            <li key={action.id}>
+              <span className="font-medium">{action.reviewer_name}</span>{" "}
+              {action.action === "APPROVE" ? "approved" : "rejected"} this invoice
+              {action.selected_po_number ? ` on ${action.selected_po_number}` : ""}.
+              <p className="text-muted-foreground">{action.note}</p>
+              {corrected.length > 0 && (
+                <ul className="mt-1.5 space-y-0.5 text-xs text-muted-foreground">
+                  {corrected.map(([field, value]) => (
+                    <li key={field}>
+                      {field.replaceAll("_", " ")}:{" "}
+                      <span className="line-through">
+                        {modelValue(original, field as CorrectableField) || "—"}
+                      </span>{" "}
+                      → <span className="text-foreground">{String(value)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
     </div>
   );

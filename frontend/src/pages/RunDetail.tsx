@@ -15,7 +15,16 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useJob, useRetryJob } from "@/hooks/queries";
 import { api } from "@/lib/api";
-import { formatDate, formatDateTime, formatMoney, formatMs, formatPercent, isRunning } from "@/lib/format";
+import {
+  buildTimeline,
+  formatDate,
+  formatDateTime,
+  formatMoney,
+  formatMs,
+  formatPercent,
+  isRunning,
+  latestMessage,
+} from "@/lib/format";
 import type { InvoiceResultRow, JobDetail, JobRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/store/ui";
@@ -109,6 +118,7 @@ export function RunDetail() {
             Processing
           </h2>
           <StageTimeline events={events} jobStatus={job.status} live={running} />
+          {!running && <RunSummaryStrip detail={data} />}
           <RunDetails job={job} result={result} />
         </section>
         {!running && (
@@ -119,6 +129,36 @@ export function RunDetail() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The three facts about the run itself, once it is over: how long it took end to end, how far
+ * the pipeline got, and the one line the worker last wrote. Everything technical behind it stays
+ * inside the timeline's Technical details.
+ */
+function RunSummaryStrip({ detail }: { detail: JobDetail }) {
+  const { events, job } = detail;
+  const stages = buildTimeline(events, job.status);
+  const done = stages.filter((stage) => stage.state === "done").length;
+  // invoice_closed carries the end-to-end duration the worker measured.
+  const elapsed = events.find((event) => event.stage === "invoice_closed")?.ms ?? null;
+  const message = latestMessage(events, job.status);
+
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-2 rounded-xl border border-divider px-4 py-3">
+      <span className="text-sm">
+        <span className="text-muted-foreground">Took </span>
+        <span className="font-medium tabular-nums">{elapsed != null ? formatMs(elapsed) : "—"}</span>
+      </span>
+      <span className="text-sm">
+        <span className="text-muted-foreground">Stages </span>
+        <span className="font-medium tabular-nums">
+          {done}/{stages.length}
+        </span>
+      </span>
+      {message && <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground">{message}</span>}
     </div>
   );
 }

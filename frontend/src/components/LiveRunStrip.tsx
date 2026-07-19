@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { motion, useReducedMotion } from "motion/react";
 
-import { buildTimeline } from "@/lib/format";
+import { buildTimeline, latestMessage } from "@/lib/format";
 import type { InvoiceEvent, JobStatus } from "@/lib/types";
 
 /**
@@ -55,6 +55,7 @@ export function LiveRunStrip({
   const reduce = useReducedMotion();
   const now = useTicker(true);
   const stages = buildTimeline(events, jobStatus);
+  const message = latestMessage(events, jobStatus);
 
   const active = stages.find((stage) => stage.state === "active");
   const lastDone = [...stages].reverse().find((stage) => stage.state === "done");
@@ -83,6 +84,8 @@ export function LiveRunStrip({
           <p className="mt-1.5 text-xl md:text-2xl font-semibold tracking-tight truncate">
             {jobStatus === "PENDING" ? "Waiting for a worker" : (current?.label ?? "Starting")}
           </p>
+          {/* One human-readable line, quoted from the worker. Technical payloads stay collapsed. */}
+          {message && <p className="mt-1 text-sm text-white/60 line-clamp-2">{message}</p>}
         </div>
 
         <div className="text-right shrink-0">

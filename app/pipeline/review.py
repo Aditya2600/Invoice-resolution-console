@@ -9,23 +9,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.core.schemas import DecisionStatus, InvoiceExtraction, MatchResult
+from app.core.schemas import DecisionStatus, InvoiceExtraction, MatchResult, merge_corrections
 from app.db import repository
 from app.pipeline.decision import build_policy_snapshot, evaluate_decision, match_purchase_order, policy_hash
+from app.pipeline.normalizer import normalize_invoice_number, normalize_name
 
 
 class ReviewError(RuntimeError):
     """The requested resolution is not allowed for this job."""
 
 
-def _corrected_extraction(original: dict[str, Any], corrections: dict[str, Any]) -> InvoiceExtraction:
-    """Original model extraction stays untouched in invoice_results; this is the review-time view.
-
-    A human has now read the document, so the auto-approval confidence gate is attested rather than
-    modelled. Every financial rule (PO open, vendor, currency, remaining balance) still applies.
-    """
-    merged = {**original, **{k: v for k, v in corrections.items() if v is not None}}
-    return InvoiceExtraction(**{**merged, "extraction_confidence": 1.0})
+def _correction_detail(original: dict[str, Any], corrections: dict[str, Any]) -> list[dict[str, Any]]:
+    """Before/after for every field the reviewer touched, for the audit event."""
+    return [
+        {"field": field, "original": original.get(field), "corrected": value}
+        for field, value in corrections.items()
+        if value is not None
+    ]
 
 
 def resolve_review(
@@ -50,18 +50,23 @@ def resolve_review(
         raise ReviewError("This job has no decision result to resolve.")
 
     corrections = corrections or {}
-    extraction = _corrected_extraction(result["extraction"], corrections)
+    original = result["extraction"]
+    extraction = InvoiceExtraction(**merge_corrections(original, corrections))
+    # The policy frozen onto the result at processing time, not whatever the config says today.
+    snapshot = result.get("policy_snapshot") or build_policy_snapshot(extraction.vendor_name)
     review_action = {
         "reviewer_name": reviewer_name,
         "action": action,
         "selected_po_number": selected_po_number,
         "corrections": corrections,
+        "corrections_detail": _correction_detail(original, corrections),
+        "reviewer_attestation": action == "APPROVE",
         "note": note,
         "decision_before": job["decision_status"],
     }
 
     if action == "REJECT":
-        snapshot = build_policy_snapshot(extraction.vendor_name)
+        # A rejection releases the identity outright, so there is nothing to migrate.
         return repository.finalize_invoice_decision(
             job_id=job_id,
             document_id=job["document_id"],
@@ -91,9 +96,12 @@ def resolve_review(
     else:
         match = match_purchase_order(extraction)
 
-    # Deterministic re-validation: a closed PO or an insufficient balance can never be approved,
-    # regardless of what the reviewer asked for.
-    decision = evaluate_decision(extraction, match, None)
+    # Deterministic re-validation of the effective extraction: vendor, PO, currency, arithmetic and
+    # balance are all re-checked, so a closed PO or an insufficient balance can never be approved
+    # regardless of what the reviewer asked for. Only the model-confidence gate is attested away.
+    decision = evaluate_decision(
+        extraction, match, None, policy_snapshot=snapshot, reviewer_attestation=True
+    )
     if decision.status != DecisionStatus.APPROVED:
         raise ReviewError(
             "This invoice still fails validation and cannot be approved: " + " ".join(decision.reasons)
@@ -106,13 +114,27 @@ def resolve_review(
         extraction=result["extraction"],
         matched_po=decision.matched_po.model_dump(mode="json") if decision.matched_po else None,
         reasons=[f"Approved by {reviewer_name}: {note}"],
-        rule_checks={**decision.rule_checks, "human_review": {"passed": True, "reviewer": reviewer_name}},
+        rule_checks={
+            **decision.rule_checks,
+            "human_review": {
+                "passed": True,
+                "reviewer": reviewer_name,
+                "reviewer_attestation": True,
+                "model_confidence": original.get("extraction_confidence"),
+                "corrected_fields": [item["field"] for item in review_action["corrections_detail"]],
+            },
+        },
         model_name=result["model_name"],
         model_latency_ms=result["model_latency_ms"],
         allocation_amount=extraction.total,
         review_action=review_action,
         policy_snapshot=decision.policy_snapshot,
         policy_hash=decision.policy_hash,
+        identity={
+            "vendor_normalized": normalize_name(extraction.vendor_name),
+            "invoice_number_normalized": normalize_invoice_number(extraction.invoice_number),
+            "total": extraction.total,
+        },
     )
     if outcome["decision_status"] != DecisionStatus.APPROVED:
         raise ReviewError(

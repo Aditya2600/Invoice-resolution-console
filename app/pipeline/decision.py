@@ -56,6 +56,20 @@ def build_policy_snapshot(vendor_name: str | None) -> dict:
     }
 
 
+def rule_from_snapshot(snapshot: dict) -> VendorRule:
+    """Rebuild the rule a decision was made under, so a re-review reads the frozen values.
+
+    A reviewer resolving an invoice weeks later must be judged by the policy that was in force
+    when it was processed, never by whatever vendor_rules.json says today.
+    """
+    return VendorRule(
+        amount_tolerance=Decimal(str(snapshot["amount_tolerance"])),
+        minimum_auto_approve_confidence=float(snapshot["minimum_auto_approve_confidence"]),
+        require_po_number=bool(snapshot["require_po_number"]),
+        allowed_currencies=tuple(currency.upper() for currency in snapshot["allowed_currencies"]),
+    )
+
+
 def policy_hash(snapshot: dict) -> str:
     """Stable SHA-256 over canonical sorted JSON: same rule values always hash the same."""
     canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
@@ -95,10 +109,19 @@ def evaluate_decision(
     extraction: InvoiceExtraction,
     match: MatchResult,
     semantic_duplicate: dict | None,
+    *,
+    policy_snapshot: dict | None = None,
+    reviewer_attestation: bool = False,
 ) -> InvoiceDecision:
-    """Deterministic policy verdict, stamped with the rule values it was made under."""
-    snapshot = build_policy_snapshot(extraction.vendor_name)
-    decision = _evaluate(extraction, match, semantic_duplicate)
+    """Deterministic policy verdict, stamped with the rule values it was made under.
+
+    Pass policy_snapshot to re-evaluate under a decision's frozen policy instead of the current
+    config; reviewer_attestation replaces the model-confidence gate with a human's sign-off.
+    """
+    snapshot = policy_snapshot or build_policy_snapshot(extraction.vendor_name)
+    decision = _evaluate(
+        extraction, match, semantic_duplicate, rule_from_snapshot(snapshot), reviewer_attestation
+    )
     return decision.model_copy(update={"policy_snapshot": snapshot, "policy_hash": policy_hash(snapshot)})
 
 
@@ -106,8 +129,9 @@ def _evaluate(
     extraction: InvoiceExtraction,
     match: MatchResult,
     semantic_duplicate: dict | None,
+    rule: VendorRule,
+    reviewer_attestation: bool,
 ) -> InvoiceDecision:
-    rule = get_vendor_rule(extraction.vendor_name)
     checks: dict[str, object] = {}
     reasons: list[str] = []
 
@@ -142,11 +166,14 @@ def _evaluate(
     if not arithmetic_ok:
         reasons.append("Subtotal plus tax does not reconcile to the extracted total.")
 
-    confidence_ok = extraction.extraction_confidence >= rule.minimum_auto_approve_confidence
+    # The model's own confidence is reported unchanged either way; attestation records that a
+    # human read the document, it never rewrites what the model claimed.
+    confidence_ok = reviewer_attestation or extraction.extraction_confidence >= rule.minimum_auto_approve_confidence
     checks["extraction_confidence"] = {
         "passed": confidence_ok,
         "value": extraction.extraction_confidence,
         "minimum": rule.minimum_auto_approve_confidence,
+        "reviewer_attested": reviewer_attestation,
     }
     if not confidence_ok:
         reasons.append("Extraction confidence is below the auto-approval threshold.")

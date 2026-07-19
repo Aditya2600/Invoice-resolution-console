@@ -2,9 +2,18 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { isRunning } from "@/lib/format";
-import type { JobDetail, JobListItem, PurchaseOrder, ResolveReviewRequest, RetryJobRequest } from "@/lib/types";
+import type {
+  JobDetail,
+  JobListItem,
+  OpsOverview,
+  PurchaseOrder,
+  ResolveReviewRequest,
+  RetryJobRequest,
+} from "@/lib/types";
 
 const POLL_MS = 2500;
+/** Aggregates move slowly and the query scans an event window, so it is polled far less often. */
+const OVERVIEW_POLL_MS = 15000;
 
 export const jobKeys = {
   all: ["jobs"] as const,
@@ -18,6 +27,21 @@ export function useJobs(limit = 200) {
     queryKey: jobKeys.list(limit),
     queryFn: () => api.listJobs(limit),
     refetchInterval: (query) => (query.state.data?.some((job) => isRunning(job.status)) ? POLL_MS : false),
+  });
+}
+
+/**
+ * Operational aggregates for the dashboard. Refetching is time-based rather than event-based
+ * because the figures move with the worker, not with anything this tab did; TanStack tears the
+ * interval down on unmount, so leaving the dashboard stops the polling.
+ */
+export function useOpsOverview(windowHours = 24, enabled = true) {
+  return useQuery<OpsOverview>({
+    queryKey: ["ops", "overview", windowHours],
+    queryFn: () => api.opsOverview(windowHours),
+    enabled,
+    refetchInterval: OVERVIEW_POLL_MS,
+    refetchIntervalInBackground: false,
   });
 }
 

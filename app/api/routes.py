@@ -76,6 +76,12 @@ async def upload_invoice(file: UploadFile = File(...)) -> dict:
     }
 
 
+@router.get("/ops/overview")
+def ops_overview(window_hours: int = 24) -> dict:
+    """Read-only operational aggregates for the dashboard. Every figure comes from Postgres."""
+    return repository.ops_overview(window_hours)
+
+
 @router.get("/jobs")
 def list_jobs(limit: int = 50) -> dict:
     return {"jobs": repository.list_jobs(limit=min(max(limit, 1), 200))}
@@ -113,7 +119,7 @@ def resolve_review(job_id: str, body: ReviewResolveRequest) -> dict:
         )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except repository.ReviewConflict as exc:
+    except (repository.ReviewConflict, repository.IdentityConflict) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except review.ReviewError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

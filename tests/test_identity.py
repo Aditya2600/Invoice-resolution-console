@@ -68,8 +68,9 @@ def test_reviewer_rejection_releases_claim(make_job) -> None:
 
 def test_reviewer_approval_finalizes_claim(make_po, make_job) -> None:
     po_number = make_po(total="500")
-    job_id, document_id = needs_review_job(make_job)
-    claim(document_id, job_id, identity())
+    invoice_number = identity()
+    job_id, document_id = needs_review_job(make_job, invoice_number)
+    claim(document_id, job_id, invoice_number)
 
     review.resolve_review(
         job_id=job_id, action="APPROVE", reviewer_name="Priya", note="ok", selected_po_number=po_number

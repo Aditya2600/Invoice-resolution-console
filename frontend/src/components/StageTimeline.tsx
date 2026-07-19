@@ -20,6 +20,43 @@ function liveNote(reason: string | null, status: StageStatus | undefined) {
   return reason;
 }
 
+/** One raw event, exactly as the worker wrote it: internal stage name, reason, metrics, payload. */
+function TechnicalRow({ event, friendly }: { event: InvoiceEvent; friendly: string }) {
+  const metrics = Object.entries(event.metrics ?? {}).filter(
+    ([, value]) => value !== null && value !== undefined && value !== "",
+  );
+  const payload = Object.keys(event.data ?? {}).length > 0 ? event.data : null;
+
+  return (
+    <li className="text-xs">
+      <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="mono-label">{event.stage}</span>
+        <span className="mono-label text-muted-foreground">{friendly}</span>
+        {event.ms != null && <span className="mono-label text-muted-foreground">{formatMs(event.ms)}</span>}
+        <span className="inline-flex items-center gap-1.5">
+          <EventDot status={event.status} />
+          <span className="mono-label">{event.status}</span>
+        </span>
+      </div>
+      {event.reason && <p className="mt-1 text-foreground/70">{event.reason}</p>}
+      {metrics.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          {metrics.map(([key, value]) => (
+            <span key={key} className="mono-label bg-background px-2 py-0.5 rounded text-foreground/80">
+              {key.replaceAll("_", " ")}: {String(value)}
+            </span>
+          ))}
+        </div>
+      )}
+      {payload && (
+        <pre className="mt-1.5 max-h-40 overflow-auto rounded-lg bg-background p-2 font-mono text-[11px] whitespace-pre-wrap">
+          {JSON.stringify(payload, null, 2)}
+        </pre>
+      )}
+    </li>
+  );
+}
+
 /**
  * Two modes, one component. While a run is in flight the tape carries live
  * durations and deviation notes, because watching the pipeline execute is the
@@ -43,7 +80,7 @@ export function StageTimeline({
   // terminal bookkeeping row carry nothing a reviewer can act on. While the run
   // is live, upcoming stages stay visible so the remaining work is legible.
   const visible = all.filter(
-    (stage) => stage.stage !== "invoice_closed" && !(stage.state === "skipped" && !stage.event),
+    (stage) => stage.stage !== "completed" && !(stage.state === "skipped" && !stage.event),
   );
 
   return (
@@ -128,42 +165,24 @@ export function StageTimeline({
           </button>
         </CollapsibleTrigger>
         <CollapsibleContent>
+          {/* The only place internal stage names, raw reasons and event payloads appear. */}
           <ul className="mt-3 flex flex-col gap-3 rounded-xl bg-panel p-4">
-            {all.map((stage) => {
-              const event = stage.event;
-              const metrics = Object.entries(event?.metrics ?? {}).filter(
-                ([, value]) => value !== null && value !== undefined && value !== "",
-              );
-
-              return (
-                <li key={stage.stage} className="text-xs">
-                  <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
-                    <span className="mono-label">{stage.stage}</span>
-                    {event?.ms != null && <span className="mono-label text-muted-foreground">{formatMs(event.ms)}</span>}
-                    {event ? (
-                      <span className="inline-flex items-center gap-1.5">
-                        <EventDot status={event.status} />
-                        <span className="mono-label">{event.status}</span>
-                      </span>
-                    ) : (
-                      <span className="mono-label text-muted-foreground">
-                        {stage.state === "active" ? "RUNNING" : stage.state === "pending" ? "QUEUED" : "NOT RUN"}
-                      </span>
-                    )}
-                  </div>
-                  {event?.reason && <p className="mt-1 text-foreground/70">{event.reason}</p>}
-                  {metrics.length > 0 && (
-                    <div className="mt-1.5 flex flex-wrap gap-2">
-                      {metrics.map(([key, value]) => (
-                        <span key={key} className="mono-label bg-background px-2 py-0.5 rounded text-foreground/80">
-                          {key.replaceAll("_", " ")}: {String(value)}
+            {all.flatMap((stage) =>
+              stage.events.length > 0
+                ? stage.events.map((event) => (
+                    <TechnicalRow key={event.id} event={event} friendly={stage.stage} />
+                  ))
+                : [
+                    <li key={stage.stage} className="text-xs">
+                      <div className="flex flex-wrap items-baseline gap-x-3">
+                        <span className="mono-label">{stage.stage}</span>
+                        <span className="mono-label text-muted-foreground">
+                          {stage.state === "active" ? "RUNNING" : stage.state === "pending" ? "QUEUED" : "NOT RUN"}
                         </span>
-                      ))}
-                    </div>
-                  )}
-                </li>
-              );
-            })}
+                      </div>
+                    </li>,
+                  ],
+            )}
           </ul>
         </CollapsibleContent>
       </Collapsible>

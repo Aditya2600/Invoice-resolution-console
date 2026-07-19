@@ -8,6 +8,7 @@ from pathlib import Path
 import fitz
 from PIL import Image
 
+from app.core import observability
 from app.core.config import get_settings
 
 
@@ -49,10 +50,18 @@ def extract_pdf(path: Path, artifact_directory: Path) -> PdfExtraction:
 
     native_text = "\n".join(native_text_parts).strip()
     used_ocr = len(native_text) < get_settings().native_text_min_chars
+    # The OCR-fallback rate is this ratio: every document reports which path it took.
+    observability.count(
+        "invoice_provider_requests_total",
+        provider="ocr",
+        outcome="fallback" if used_ocr else "native",
+    )
     ocr_text = ""
     ocr_confidence: float | None = None
     if used_ocr and get_settings().enable_paddle_ocr:
+        started = time.perf_counter()
         ocr_text, ocr_confidence = run_paddle_ocr(image_paths)
+        observability.observe("invoice_provider_duration_ms", (time.perf_counter() - started) * 1000, provider="ocr")
 
     return PdfExtraction(
         page_count=len(image_paths),

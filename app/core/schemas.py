@@ -5,7 +5,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class JobStatus(StrEnum):
@@ -107,16 +107,49 @@ class InvoiceResult(BaseModel):
 
 
 class ExtractionCorrections(BaseModel):
-    """Reviewer overrides. Stored on the review action only; the model extraction is preserved."""
+    """Reviewer overrides. Stored on the review action only; the model extraction is preserved.
 
-    vendor_name: str | None = None
-    invoice_number: str | None = None
+    extra="forbid" is the guard: a correction to a field this list does not name is a client bug
+    or an attempt to rewrite something a reviewer may not touch, and must fail loudly with 422.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vendor_name: str | None = Field(default=None, max_length=200)
+    invoice_number: str | None = Field(default=None, max_length=100)
     invoice_date: date | None = None
-    po_number: str | None = None
+    po_number: str | None = Field(default=None, max_length=100)
     currency: str | None = None
-    subtotal: Decimal | None = None
-    tax: Decimal | None = None
-    total: Decimal | None = None
+    subtotal: Decimal | None = Field(default=None, ge=0)
+    tax: Decimal | None = Field(default=None, ge=0)
+    total: Decimal | None = Field(default=None, ge=0)
+
+    @field_validator("vendor_name", "invoice_number", "po_number")
+    @classmethod
+    def strip_text(cls, value: str | None) -> str | None:
+        cleaned = value.strip() if value else None
+        if value is not None and not cleaned:
+            raise ValueError("Correction cannot be blank.")
+        return cleaned
+
+    @field_validator("currency")
+    @classmethod
+    def check_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        code = value.strip().upper()
+        if not (len(code) == 3 and code.isalpha()):
+            raise ValueError("Currency must be a 3-letter code, for example INR.")
+        return code
+
+
+def merge_corrections(extraction: dict[str, Any], corrections: dict[str, Any] | None) -> dict[str, Any]:
+    """The effective extraction: model output with reviewer overrides laid on top.
+
+    Model confidence is deliberately not part of this merge. A human correction is an attestation,
+    not evidence that the model read the document better than it did.
+    """
+    return {**extraction, **{k: v for k, v in (corrections or {}).items() if v is not None}}
 
 
 class ReviewResolveRequest(BaseModel):

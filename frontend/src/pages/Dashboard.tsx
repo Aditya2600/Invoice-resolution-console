@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 
 import { JobsTable } from "@/components/JobsTable";
 import { KpiTile } from "@/components/KpiTile";
+import { OperationsPanel } from "@/components/OperationsPanel";
 import { ErrorState } from "@/components/QueryState";
 import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
@@ -65,6 +66,9 @@ export function Dashboard() {
           <KpiTile label="Needs review" value={kpis.review} tone="warning" />
           <KpiTile label="Approved" value={kpis.approved} />
           <KpiTile label="Rejected" value={kpis.rejected} />
+        </div>
+        <div className="mt-4">
+          <OperationsPanel />
         </div>
       </section>
 

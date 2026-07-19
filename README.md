@@ -80,10 +80,10 @@ Filesystem storage (`storage/`) holds the uploaded PDF bytes and rendered page-i
  5. stage_text_extract      native PyMuPDF text; if too short → render page PNGs
               │                                  (weak text also triggers OCR fallback)
               ▼
- 6. stage_ocr_fallback      [optional] PaddleOCR reads the rendered pages
+ 6. stage_ocr_fallback      PaddleOCR reads the rendered pages
               │
               ▼
- 7. stage_medha_extract     MEDHA (if configured) reads text + page images,
+ 7. stage_medha_extract     MEDHA reads text + page images,
               │             returns strict JSON: vendor, invoice#, PO#, amounts,
               │             line items, confidence, per-field evidence
               │             — else: deterministic heuristic_extract() fallback

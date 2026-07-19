@@ -40,6 +40,64 @@ export const STAGE_LABELS: Record<StageName, string> = {
   invoice_closed: "Invoice closed",
 };
 
+/** The eight stages an operator reads. Internal stage names stay in Technical details. */
+export const FRIENDLY_STAGE_ORDER = [
+  "received",
+  "document_read",
+  "text_or_ocr",
+  "ai_extraction",
+  "duplicate_check",
+  "po_validation",
+  "decision",
+  "completed",
+] as const;
+
+export type FriendlyStage = (typeof FRIENDLY_STAGE_ORDER)[number];
+
+/** Mirrors STAGE_MAP in app/core/observability.py. */
+export const FRIENDLY_STAGE_OF: Record<StageName, FriendlyStage> = {
+  invoice_received: "received",
+  stage_pdf_validate: "document_read",
+  stage_text_extract: "text_or_ocr",
+  stage_ocr_fallback: "text_or_ocr",
+  stage_medha_extract: "ai_extraction",
+  stage_semantic_duplicate: "duplicate_check",
+  stage_po_match: "po_validation",
+  stage_policy_validate: "decision",
+  invoice_closed: "completed",
+};
+
+export const FRIENDLY_STAGE_LABELS: Record<FriendlyStage, string> = {
+  received: "Invoice received",
+  document_read: "Document read",
+  text_or_ocr: "Text extracted",
+  ai_extraction: "Invoice data extracted",
+  duplicate_check: "Duplicate check",
+  po_validation: "Purchase order checked",
+  decision: "Decision",
+  completed: "Completed",
+};
+
+/** GET /api/ops/overview. Every figure is aggregated in Postgres, never counted in the browser. */
+export interface OpsOverview {
+  window_hours: number;
+  queue: Partial<Record<JobStatus, number>>;
+  awaiting_review: number;
+  decisions: Partial<Record<DecisionStatus, number>>;
+  reliability: { failed_jobs: number; manual_retries: number; retried_jobs: number; jobs: number };
+  processing_ms: { p50: number | null; p95: number | null; samples: number };
+  stages: { stage: FriendlyStage; p50_ms: number | null; p95_ms: number | null; samples: number }[];
+  ocr: { fallbacks: number; documents: number; fallback_rate: number | null };
+  medha: {
+    success: number;
+    timeout: number;
+    error: number;
+    p50_ms: number | null;
+    p95_ms: number | null;
+  };
+  top_failures: { reason: string; occurrences: number }[];
+}
+
 export interface JobListItem {
   job_id: string;
   document_id: string;
@@ -179,6 +237,8 @@ export interface JobDetail {
   job: JobRow;
   events: InvoiceEvent[];
   result: InvoiceResultRow | null;
+  /** Model extraction with the last reviewer's corrections applied. Null until a run produces one. */
+  effective_extraction: InvoiceExtraction | null;
   review_actions: ReviewActionRow[];
   allocations: PoAllocation[];
 }

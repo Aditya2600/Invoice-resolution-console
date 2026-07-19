@@ -9,7 +9,8 @@ from app.db.repository import claim_one_job
 from app.pipeline.orchestrator import process_job
 
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# Bare message: the pipeline emits one JSON object per line, which a prefix would make unparseable.
+logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
 

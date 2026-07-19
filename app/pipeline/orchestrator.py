@@ -4,12 +4,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.core import observability
 from app.core.config import get_settings
 from app.core.schemas import DecisionStatus, StageStatus
 from app.db import repository
 from app.pipeline.decision import evaluate_decision, match_purchase_order
 from app.pipeline.normalizer import heuristic_extract
-from app.services.medha import MedhaClient
+from app.services.medha import MedhaClient, MedhaError
 from app.services.pdf import extract_pdf, inspect_pdf
 from app.services.storage import file_path
 
@@ -23,6 +24,9 @@ def process_job(job: dict[str, Any]) -> None:
     document_id = job["document_id"]
     started = time.perf_counter()
     settings = get_settings()
+    # Every log line this run emits carries the job id as its correlation id; the worker
+    # handles one job per thread, so the context variable never straddles two runs.
+    observability.request_id.set(job_id)
     model_name: str | None = None
     model_latency_ms: float | None = None
 
@@ -73,7 +77,20 @@ def process_job(job: dict[str, Any]) -> None:
         if medha.is_configured:
             repository.extend_lease(job_id)
             model_started = time.perf_counter()
-            extraction, model_latency_ms = medha.extract(page_images=pdf.page_images, raw_text=raw_text)
+            try:
+                extraction, model_latency_ms = medha.extract(page_images=pdf.page_images, raw_text=raw_text)
+            except MedhaError as exc:
+                # Recorded as a stage event so provider health is queryable from Postgres, not
+                # only from a per-process counter. The exception still fails the job as before.
+                repository.log_event(
+                    job_id,
+                    "stage_medha_extract",
+                    StageStatus.FAIL,
+                    reason=str(exc),
+                    ms=_ms(model_started),
+                    data={"error_code": exc.error_code, "provider": "medha"},
+                )
+                raise
             model_name = settings.medha_model
             repository.log_event(
                 job_id,

@@ -7,9 +7,22 @@ from pathlib import Path
 
 import httpx
 
+from app.core import observability
 from app.core.config import get_settings
 from app.core.schemas import InvoiceExtraction
 from app.pipeline.normalizer import coerce_model_extraction, parse_model_json
+
+
+class MedhaError(RuntimeError):
+    """MEDHA could not return a usable extraction."""
+
+    error_code = "medha_error"
+
+
+class MedhaTimeout(MedhaError):
+    """MEDHA did not answer within the configured timeout."""
+
+    error_code = "medha_timeout"
 
 
 SYSTEM_PROMPT = """You extract invoice facts for an AP workflow. Return JSON only.
@@ -66,18 +79,25 @@ class MedhaClient:
         endpoint = self.settings.medha_api_url.rstrip("/") + "/chat/completions"
         started = time.perf_counter()
         last_error: Exception | None = None
-        for attempt in range(self.settings.medha_max_retries + 1):
-            try:
-                with httpx.Client(timeout=self.settings.medha_timeout_seconds) as client:
-                    response = client.post(endpoint, headers=headers, json=payload)
-                    response.raise_for_status()
-                body = response.json()
-                content_text = body["choices"][0]["message"]["content"]
-                extraction = coerce_model_extraction(parse_model_json(content_text), raw_text)
-                return extraction, (time.perf_counter() - started) * 1000
-            except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as exc:
-                last_error = exc
-                if attempt >= self.settings.medha_max_retries:
-                    break
-        raise RuntimeError(f"MEDHA extraction failed: {last_error}")
+        # One provider_call spans every retry: an extraction either produced a result or it did
+        # not, and a per-attempt count would read as more traffic than the pipeline generates.
+        with observability.provider_call("medha") as call:
+            for attempt in range(self.settings.medha_max_retries + 1):
+                try:
+                    with httpx.Client(timeout=self.settings.medha_timeout_seconds) as client:
+                        response = client.post(endpoint, headers=headers, json=payload)
+                        response.raise_for_status()
+                    body = response.json()
+                    content_text = body["choices"][0]["message"]["content"]
+                    extraction = coerce_model_extraction(parse_model_json(content_text), raw_text)
+                    return extraction, (time.perf_counter() - started) * 1000
+                except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    if attempt >= self.settings.medha_max_retries:
+                        break
+            if isinstance(last_error, httpx.TimeoutException):
+                call["outcome"] = "timeout"
+                raise MedhaTimeout(f"MEDHA timed out: {last_error}")
+            call["outcome"] = "error"
+            raise MedhaError(f"MEDHA extraction failed: {last_error}")
 
