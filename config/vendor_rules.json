@@ -1,0 +1,14 @@
+{
+  "__default__": {
+    "amount_tolerance": "1.00",
+    "minimum_auto_approve_confidence": 0.85,
+    "require_po_number": false,
+    "allowed_currencies": ["INR"]
+  },
+  "acmesuppliespvtltd": {
+    "amount_tolerance": "1.00",
+    "minimum_auto_approve_confidence": 0.85,
+    "require_po_number": true,
+    "allowed_currencies": ["INR"]
+  }
+}

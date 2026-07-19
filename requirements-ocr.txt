@@ -1,0 +1,5 @@
+# Install this in addition to requirements.txt when the worker needs local OCR.
+# PaddlePaddle wheel availability differs by platform; install the wheel appropriate
+# for your CPU/GPU first, then install PaddleOCR.
+paddleocr>=2.9,<4.0
+
