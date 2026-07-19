@@ -77,10 +77,16 @@ export function RunDetail() {
             {job.file_name} · {formatDate(job.created_at)}
           </p>
         </div>
-        <Button asChild variant="outline" className="rounded-full border-foreground/20">
-          <a href={api.documentFileUrl(job.document_id)} target="_blank" rel="noreferrer">
-            Original PDF <ExternalLink className="size-3.5 ml-1" aria-hidden />
-          </a>
+        <Button
+          variant="outline"
+          className="rounded-full border-foreground/20"
+          onClick={() =>
+            api.openDocument(job.document_id).catch((error) =>
+              toast.error(error instanceof Error ? error.message : "Document preview failed."),
+            )
+          }
+        >
+          Original PDF <ExternalLink className="size-3.5 ml-1" aria-hidden />
         </Button>
       </header>
 
@@ -365,6 +371,7 @@ function RetryPanel({ job }: { job: JobRow }) {
       <p className="mt-1.5 text-sm text-muted-foreground">
         Processing stopped before a decision. Re-queueing keeps the full history of this run.
         {job.manual_retry_count > 0 && ` Retried ${job.manual_retry_count} time(s) already.`}
+        {job.last_retry_by && ` Last retried by ${job.last_retry_by}${job.last_retry_actor_role ? ` (${job.last_retry_actor_role})` : ""}.`}
       </p>
       <div className="mt-4 flex flex-wrap items-end gap-3">
         <label className="text-sm min-w-[240px] flex-1">
@@ -381,7 +388,7 @@ function RetryPanel({ job }: { job: JobRow }) {
           disabled={retry.isPending}
           onClick={() =>
             retry.mutate(
-              { requested_by: "Operator", note: note.trim() || null },
+              { note: note.trim() || null },
               {
                 onSuccess: (data) => toast.success(data.message),
                 onError: (error) => toast.error(error instanceof Error ? error.message : "Retry failed."),

@@ -358,8 +358,8 @@ def finalize_invoice_decision(
                     """
                     INSERT INTO invoice_review_actions
                       (job_id, reviewer_name, action, selected_po_number, corrections, note,
-                       decision_before, decision_after)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                       decision_before, decision_after, actor_id, actor_role)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         job_id,
@@ -370,6 +370,8 @@ def finalize_invoice_decision(
                         review_action["note"],
                         review_action.get("decision_before"),
                         final_status,
+                        review_action.get("actor_id"),
+                        review_action.get("actor_role"),
                     ),
                 )
                 _insert_event(
@@ -381,6 +383,8 @@ def finalize_invoice_decision(
                     None,
                     {
                         "reviewer_name": review_action["reviewer_name"],
+                        "actor_id": review_action.get("actor_id"),
+                        "actor_role": review_action.get("actor_role"),
                         "action": review_action["action"],
                         "note": review_action["note"],
                         "selected_po_number": review_action.get("selected_po_number"),
@@ -541,8 +545,11 @@ def fail_job(job_id: str, error: str) -> None:
     if status == "FAILED":
         observability.count("invoice_jobs_failed_total")
         observability.log(
-            "job_failed", job_id=job_id, document_id=job["document_id"], outcome="FAILED",
-            error_code=error[:120],
+            "job_failed",
+            job_id=job_id,
+            document_id=job["document_id"],
+            outcome="FAILED",
+            error_code="job_failed",
         )
 
 
@@ -817,7 +824,14 @@ class RetryConflict(RuntimeError):
     """Only a FAILED job may be retried."""
 
 
-def retry_job(job_id: str, *, requested_by: str, note: str | None = None) -> dict[str, Any]:
+def retry_job(
+    job_id: str,
+    *,
+    requested_by: str,
+    note: str | None = None,
+    actor_id: str | None = None,
+    actor_role: str | None = None,
+) -> dict[str, Any]:
     """Re-queue a failed job under a new retry generation, preserving all history.
 
     Attempts reset so the new run gets a full budget; retry_generation and manual_retry_count
@@ -845,13 +859,15 @@ def retry_job(job_id: str, *, requested_by: str, note: str | None = None) -> dic
                     manual_retry_count = manual_retry_count + 1,
                     last_retry_at = now(),
                     last_retry_by = %s,
+                    last_retry_actor_id = %s,
+                    last_retry_actor_role = %s,
                     lease_until = NULL,
                     last_error = NULL,
                     updated_at = now()
                 WHERE job_id = %s
                 RETURNING retry_generation, manual_retry_count
                 """,
-                (requested_by, job_id),
+                (requested_by, actor_id, actor_role, job_id),
             )
             updated = cur.fetchone()
             _insert_event(
@@ -863,6 +879,8 @@ def retry_job(job_id: str, *, requested_by: str, note: str | None = None) -> dic
                 None,
                 {
                     "requested_by": requested_by,
+                    "actor_id": actor_id,
+                    "actor_role": actor_role,
                     "note": note,
                     "retry_generation": updated["retry_generation"],
                     "manual_retry_count": updated["manual_retry_count"],

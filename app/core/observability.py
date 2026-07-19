@@ -27,6 +27,20 @@ from typing import Any, Iterator
 
 logger = logging.getLogger("invoice")
 
+_REDACTED_LOG_FIELDS = {
+    "authorization",
+    "authorization_header",
+    "access_token",
+    "id_token",
+    "jwt",
+    "token",
+    "upload_bytes",
+    "raw_pdf_text",
+    "raw_text",
+    "raw_model_output",
+    "model_output",
+}
+
 # The eight stages an operator reads. Internal stage names stay in the event payload and the
 # "Technical details" pane; they never become a metric label.
 FRIENDLY_STAGES = (
@@ -190,7 +204,27 @@ def log(event: str, **fields: Any) -> None:
     open as a time series, and it is what an operator greps when a specific run went wrong.
     """
     record = {"event": event, "request_id": request_id.get(), **fields}
+    record = _redact_log_values(record)
     logger.info(json.dumps({key: value for key, value in record.items() if value is not None}))
+
+
+def _redact_log_values(value: Any, field_name: str | None = None) -> Any:
+    """Keep structured logs useful without allowing request secrets or document contents in them."""
+    if field_name:
+        normalized = field_name.lower().replace("-", "_")
+        if (
+            normalized in _REDACTED_LOG_FIELDS
+            or normalized.endswith("_token")
+            or "authorization" in normalized
+        ):
+            return "[REDACTED]"
+    if isinstance(value, dict):
+        return {str(key): _redact_log_values(item, str(key)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_log_values(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_log_values(item) for item in value]
+    return value
 
 
 def record_stage(

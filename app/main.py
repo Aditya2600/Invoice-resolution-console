@@ -10,12 +10,14 @@ from fastapi.responses import PlainTextResponse
 
 from app.api.routes import router
 from app.core import observability
+from app.core.auth import validate_auth_configuration
 from app.db.pg import init_schema
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    validate_auth_configuration()
     init_schema()
     yield
 
@@ -67,4 +69,3 @@ def metrics() -> str:
     """Prometheus scrape target. Labels are bounded and carry no invoice content — see
     app/core/observability.py. Reports this process only; the worker is scraped separately."""
     return observability.render()
-

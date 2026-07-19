@@ -1,5 +1,6 @@
 import type {
   ImportPurchaseOrdersResponse,
+  AuthenticatedActor,
   JobDetail,
   JobListItem,
   OpsOverview,
@@ -23,18 +24,40 @@ export class ApiError extends Error {
   }
 }
 
+function authorizationHeaders(): Record<string, string> {
+  const configured = import.meta.env.VITE_API_TOKEN as string | undefined;
+  const stored = typeof window === "undefined" ? null : window.sessionStorage.getItem("invoice_api_token");
+  const token = stored || configured;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function withAuthentication(init?: RequestInit): RequestInit {
+  const headers = new Headers(init?.headers);
+  for (const [key, value] of Object.entries(authorizationHeaders())) headers.set(key, value);
+  return { ...init, headers };
+}
+
+function errorMessage(status: number, detail?: string): string {
+  if (detail) return detail;
+  if (status === 401) return "Authentication is required. Provide a valid bearer token.";
+  if (status === 403) return "Your account does not have permission for this action.";
+  if (status === 413) return "The upload exceeds the server's size limit.";
+  if (status === 422) return "The submitted file or form could not be accepted.";
+  return `Request failed (${status}).`;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, init);
+    response = await fetch(`${API_BASE_URL}${path}`, withAuthentication(init));
   } catch {
     throw new ApiError("Cannot reach the API. Start the FastAPI server or Docker Compose.", 0);
   }
 
   const body = await response.json().catch(() => null);
   if (!response.ok) {
-    const detail = body && typeof body.detail === "string" ? body.detail : `Request failed (${response.status}).`;
-    throw new ApiError(detail, response.status);
+    const detail = body && typeof body.detail === "string" ? body.detail : undefined;
+    throw new ApiError(errorMessage(response.status, detail), response.status);
   }
   return body as T;
 }
@@ -57,6 +80,7 @@ export function uploadInvoiceWithProgress(
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", `${API_BASE_URL}/invoices/upload`);
+    for (const [key, value] of Object.entries(authorizationHeaders())) xhr.setRequestHeader(key, value);
 
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
@@ -76,8 +100,8 @@ export function uploadInvoiceWithProgress(
       const detail =
         body && typeof body === "object" && typeof (body as { detail?: unknown }).detail === "string"
           ? (body as { detail: string }).detail
-          : `Upload failed (${xhr.status}).`;
-      reject(new ApiError(detail, xhr.status));
+          : undefined;
+      reject(new ApiError(errorMessage(xhr.status, detail), xhr.status));
     };
     xhr.onerror = () =>
       reject(new ApiError("Cannot reach the API. Start the FastAPI server or Docker Compose.", 0));
@@ -91,6 +115,7 @@ export function uploadInvoiceWithProgress(
 }
 
 export const api = {
+  currentActor: () => request<AuthenticatedActor>("/auth/me"),
   opsOverview: (windowHours = 24) => request<OpsOverview>(`/ops/overview?window_hours=${windowHours}`),
   listJobs: (limit = 200) => request<{ jobs: JobListItem[] }>(`/jobs?limit=${limit}`).then((body) => body.jobs),
   getJob: (jobId: string) => request<JobDetail>(`/jobs/${jobId}`),
@@ -112,5 +137,23 @@ export const api = {
   importPurchaseOrders: (file: File) => upload<ImportPurchaseOrdersResponse>("/purchase-orders/import", file),
   seedPurchaseOrders: () =>
     request<ImportPurchaseOrdersResponse>("/demo/seed-purchase-orders", { method: "POST" }),
-  documentFileUrl: (documentId: string) => `${API_BASE_URL}/documents/${documentId}/file`,
+  openDocument: async (documentId: string) => {
+    let response: Response;
+    try {
+      response = await fetch(
+        `${API_BASE_URL}/documents/${documentId}/file`,
+        withAuthentication({ cache: "no-store" }),
+      );
+    } catch {
+      throw new ApiError("Cannot reach the API. Start the FastAPI server or Docker Compose.", 0);
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => null);
+      const detail = body && typeof body.detail === "string" ? body.detail : undefined;
+      throw new ApiError(errorMessage(response.status, detail), response.status);
+    }
+    const url = URL.createObjectURL(await response.blob());
+    window.open(url, "_blank", "noopener,noreferrer");
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  },
 };

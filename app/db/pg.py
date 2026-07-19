@@ -171,6 +171,10 @@ ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS retry_generation INTEGER NOT N
 ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS manual_retry_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
 ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_by TEXT;
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_actor_id TEXT;
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_actor_role TEXT;
+ALTER TABLE invoice_review_actions ADD COLUMN IF NOT EXISTS actor_id TEXT;
+ALTER TABLE invoice_review_actions ADD COLUMN IF NOT EXISTS actor_role TEXT;
 
 -- The operations overview slices events by stage and by failure inside a time window; without
 -- these it degrades to a sequential scan of the whole event log as history grows.
@@ -206,4 +210,3 @@ def init_schema() -> None:
         with conn.cursor() as cur:
             cur.execute(SCHEMA_SQL)
         conn.commit()
-

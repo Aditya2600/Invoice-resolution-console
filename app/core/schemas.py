@@ -154,14 +154,14 @@ def merge_corrections(extraction: dict[str, Any], corrections: dict[str, Any] | 
 
 class ReviewResolveRequest(BaseModel):
     action: ReviewAction
-    reviewer_name: str = Field(min_length=1, max_length=120)
+    reviewer_name: str | None = Field(default=None, max_length=120)  # compatibility only; never trusted
     note: str = Field(min_length=1, max_length=2000)
     selected_po_number: str | None = None
     corrections: ExtractionCorrections | None = None
 
 
 class RetryRequest(BaseModel):
-    requested_by: str = Field(default="Operator", max_length=120)
+    requested_by: str | None = Field(default=None, max_length=120)  # compatibility only; never trusted
     note: str | None = Field(default=None, max_length=2000)
 
 
@@ -174,4 +174,3 @@ class JobListItem(BaseModel):
     attempts: int
     created_at: datetime
     updated_at: datetime
-

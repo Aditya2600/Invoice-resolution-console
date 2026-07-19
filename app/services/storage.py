@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import errno
 import hashlib
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,23 +13,61 @@ from fastapi import UploadFile
 from app.core.config import get_settings
 
 
-def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+class UploadTooLarge(ValueError):
+    pass
 
 
-def save_uploaded_pdf(upload: UploadFile, data: bytes) -> tuple[str, str]:
-    """Returns (storage_key, sha256). Uses local storage for the MVP."""
+def quarantine_upload(upload: UploadFile) -> tuple[Path, str, int]:
+    """Stream an untrusted upload to an OS temporary file while calculating its hash."""
     settings = get_settings()
-    digest = sha256_bytes(data)
-    filename = Path(upload.filename or "invoice.pdf").name
-    storage_key = f"{digest[:16]}-{uuid4().hex[:8]}-{filename}"
-    destination = settings.storage_dir / storage_key
-    destination.write_bytes(data)
-    return storage_key, digest
+    handle = tempfile.NamedTemporaryFile(prefix="invoice-upload-", suffix=".quarantine", delete=False)
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with handle:
+            while chunk := upload.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > settings.upload_limit_bytes:
+                    raise UploadTooLarge(f"PDF exceeds {settings.upload_limit_bytes} byte limit.")
+                digest.update(chunk)
+                handle.write(chunk)
+        return Path(handle.name), digest.hexdigest(), size
+    except Exception:
+        Path(handle.name).unlink(missing_ok=True)
+        raise
+
+
+def commit_quarantined_pdf(path: Path, digest: str) -> str:
+    """Move a validated file into managed storage under a server-generated name."""
+    storage_key = f"{digest[:16]}-{uuid4().hex}.pdf"
+    destination = file_path(storage_key)
+    try:
+        os.replace(path, destination)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        staged = destination.with_suffix(".part")
+        try:
+            shutil.copyfile(path, staged)
+            os.replace(staged, destination)
+            path.unlink(missing_ok=True)
+        except Exception:
+            staged.unlink(missing_ok=True)
+            destination.unlink(missing_ok=True)
+            raise
+    return storage_key
 
 
 def file_path(storage_key: str) -> Path:
-    return get_settings().storage_dir / storage_key
+    storage = get_settings().storage_dir.resolve()
+    normalized = storage_key.replace("\\", "/")
+    safe_key = normalized.rsplit("/", 1)[-1]
+    if not safe_key or safe_key in {".", ".."} or safe_key != storage_key:
+        raise ValueError("Invalid managed storage key.")
+    candidate = (storage / safe_key).resolve()
+    if candidate.parent != storage:
+        raise ValueError("Invalid managed storage key.")
+    return candidate
 
 
 def reset_storage() -> None:
@@ -37,4 +78,3 @@ def reset_storage() -> None:
                 shutil.rmtree(child)
             else:
                 child.unlink()
-

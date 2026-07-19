@@ -126,6 +126,8 @@ export interface JobRow extends JobListItem {
   manual_retry_count: number;
   last_retry_at: string | null;
   last_retry_by: string | null;
+  last_retry_actor_id: string | null;
+  last_retry_actor_role: string | null;
 }
 
 export interface InvoiceEvent {
@@ -224,6 +226,8 @@ export interface ReviewActionRow {
   id: number;
   job_id: string;
   reviewer_name: string;
+  actor_id: string | null;
+  actor_role: string | null;
   action: ReviewAction;
   selected_po_number: string | null;
   corrections: Record<string, string | null>;
@@ -247,7 +251,6 @@ export type ReviewAction = "APPROVE" | "REJECT";
 
 export interface ResolveReviewRequest {
   action: ReviewAction;
-  reviewer_name: string;
   note: string;
   selected_po_number?: string | null;
   corrections?: Record<string, string> | null;
@@ -261,8 +264,14 @@ export interface ResolveReviewResponse {
 }
 
 export interface RetryJobRequest {
-  requested_by: string;
   note?: string | null;
+}
+
+export interface AuthenticatedActor {
+  subject: string;
+  display_name: string;
+  role: "viewer" | "operator" | "reviewer" | "admin";
+  auth_mode: "development" | "jwt";
 }
 
 export interface RetryJobResponse {

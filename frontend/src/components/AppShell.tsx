@@ -3,6 +3,7 @@ import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { useAuthenticatedActor } from "@/hooks/queries";
 import { useUiStore } from "@/store/ui";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +32,7 @@ function Logo() {
 function SiteHeader() {
   const open = useUiStore((state) => state.mobileNavOpen);
   const setOpen = useUiStore((state) => state.setMobileNavOpen);
+  const actor = useAuthenticatedActor();
 
   return (
     <header className="sticky top-0 z-40 bg-background/85 backdrop-blur border-b border-divider">
@@ -56,6 +58,14 @@ function SiteHeader() {
           ))}
         </nav>
         <div className="hidden md:flex items-center gap-2">
+          {actor.data && (
+            <div className="mr-2 text-right">
+              <div className="text-xs font-medium">{actor.data.display_name}</div>
+              <div className="mono-label text-muted-foreground">
+                {actor.data.auth_mode === "development" ? "LOCAL DEMO · DEVELOPMENT ONLY" : actor.data.role}
+              </div>
+            </div>
+          )}
           <Button asChild className="rounded-full bg-foreground text-background hover:bg-foreground/90">
             <Link to="/process">Process invoices</Link>
           </Button>
@@ -72,6 +82,16 @@ function SiteHeader() {
                 <SheetTitle className="text-left">Invoice Resolution</SheetTitle>
               </SheetHeader>
               <nav className="mt-6 flex flex-col gap-1 px-4">
+                {actor.data && (
+                  <div className="mb-4 border-b border-divider px-3 pb-4">
+                    <div className="text-sm font-medium">{actor.data.display_name}</div>
+                    <div className="mono-label mt-1 text-muted-foreground">
+                      {actor.data.auth_mode === "development"
+                        ? "LOCAL DEMO · DEVELOPMENT ONLY"
+                        : actor.data.role}
+                    </div>
+                  </div>
+                )}
                 {NAV.map((item) => (
                   <NavLink
                     key={item.to}

@@ -12,6 +12,13 @@ from app.core import observability
 from app.core.config import get_settings
 
 
+class PdfValidationError(ValueError):
+    def __init__(self, code: str, detail: str):
+        super().__init__(detail)
+        self.code = code
+        self.detail = detail
+
+
 @dataclass
 class PdfExtraction:
     page_count: int
@@ -27,13 +34,32 @@ class PdfExtraction:
 
 
 def inspect_pdf(path: Path) -> int:
-    with fitz.open(path) as document:
-        pages = len(document)
-    if pages == 0:
-        raise ValueError("PDF has no pages")
-    if pages > get_settings().max_pdf_pages:
-        raise ValueError(f"PDF has {pages} pages; maximum is {get_settings().max_pdf_pages}")
-    return pages
+    try:
+        with fitz.open(path) as document:
+            if document.needs_pass:
+                raise PdfValidationError("pdf_encrypted", "Password-protected PDFs are not accepted.")
+            pages = len(document)
+            if pages == 0:
+                raise PdfValidationError("pdf_empty", "The PDF has no pages.")
+            if pages > get_settings().max_pdf_pages:
+                raise PdfValidationError(
+                    "pdf_page_limit",
+                    f"The PDF exceeds the {get_settings().max_pdf_pages}-page limit.",
+                )
+            pixels = 0
+            for page in document:
+                rect = page.rect
+                pixels += int(rect.width * 2) * int(rect.height * 2)
+                if pixels > get_settings().max_render_pixels:
+                    raise PdfValidationError(
+                        "pdf_render_limit",
+                        "The PDF pages are too large to process safely.",
+                    )
+        return pages
+    except PdfValidationError:
+        raise
+    except Exception as exc:
+        raise PdfValidationError("pdf_malformed", "The PDF is malformed or unreadable.") from exc
 
 
 def extract_pdf(path: Path, artifact_directory: Path) -> PdfExtraction:
@@ -94,4 +120,3 @@ def run_paddle_ocr(image_paths: list[Path]) -> tuple[str, float | None]:
                 confidences.append(float(confidence))
     confidence = sum(confidences) / len(confidences) if confidences else None
     return "\n".join(text_parts), confidence
-

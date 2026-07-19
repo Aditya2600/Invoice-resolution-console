@@ -48,7 +48,6 @@ function failures(detail: JobDetail) {
  */
 export function ReviewPanel({ detail }: { detail: JobDetail }) {
   const { job, result } = detail;
-  const [reviewer, setReviewer] = useState("");
   const [note, setNote] = useState("");
   const [selectedPo, setSelectedPo] = useState<string | null>(result?.matched_po?.po_number ?? null);
   const [pending, setPending] = useState<ReviewAction | null>(null);
@@ -67,14 +66,13 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
   ) as Record<string, string>;
   const changedCount = Object.keys(corrections).length;
 
-  const canSubmit = reviewer.trim().length > 0 && note.trim().length > 0 && !resolve.isPending;
+  const canSubmit = note.trim().length > 0 && !resolve.isPending;
 
   function submit(action: ReviewAction) {
     setPending(action);
     resolve.mutate(
       {
         action,
-        reviewer_name: reviewer.trim(),
         note: note.trim(),
         selected_po_number: action === "APPROVE" ? selectedPo : null,
         corrections: changedCount > 0 ? corrections : null,
@@ -195,16 +193,7 @@ export function ReviewPanel({ detail }: { detail: JobDetail }) {
         </div>
       </div>
 
-      <div className="mt-6 grid gap-3 md:grid-cols-2">
-        <label className="text-sm">
-          <span className="mono-label text-muted-foreground">YOUR NAME</span>
-          <Input
-            className="mt-1.5 bg-background"
-            value={reviewer}
-            onChange={(event) => setReviewer(event.target.value)}
-            placeholder="Priya Sharma"
-          />
-        </label>
+      <div className="mt-6">
         <label className="text-sm">
           <span className="mono-label text-muted-foreground">NOTE (REQUIRED)</span>
           <Input
@@ -264,6 +253,9 @@ export function ReviewHistory({ detail }: { detail: JobDetail }) {
           return (
             <li key={action.id}>
               <span className="font-medium">{action.reviewer_name}</span>{" "}
+              {action.actor_role && (
+                <span className="text-muted-foreground">({action.actor_role}) </span>
+              )}
               {action.action === "APPROVE" ? "approved" : "rejected"} this invoice
               {action.selected_po_number ? ` on ${action.selected_po_number}` : ""}.
               <p className="text-muted-foreground">{action.note}</p>

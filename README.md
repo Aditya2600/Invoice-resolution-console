@@ -228,14 +228,31 @@ All money values use Python `Decimal`. When an invoice is approved (by the pipel
 A `NEEDS_REVIEW` job is resolved from the Run Detail page (`ReviewPanel`), never by hand-writing an outcome:
 
 - **Approve**: reviewer optionally selects a PO and/or corrects extracted fields; the server re-runs `evaluate_decision` with `extraction_confidence` attested at `1.0` and the reviewer's inputs. If it still fails a check (closed PO, insufficient balance, currency mismatch...), the API returns `422` and nothing is written.
-- **Reject**: always allowed with a reviewer name + note; releases the identity claim so a corrected re-upload can be processed.
+- **Reject**: always allowed with a note; releases the identity claim so a corrected re-upload can be processed.
 - A job that is no longer `NEEDS_REVIEW` (already resolved, or resolved concurrently by someone else) returns `409` — resolutions are not idempotent replays.
 - The original model extraction in `invoice_results` is never overwritten; corrections are stored only on the `invoice_review_actions` audit row.
+- The reviewer and retry actor are derived from the authenticated identity. Compatibility fields such as `reviewer_name` and `requested_by` in request bodies are ignored.
+
+## Authentication and secure intake
+
+There is no password or login flow in this service. `AUTH_MODE=development` uses the clearly marked local demo identity and is accepted only with `ENVIRONMENT=development`. Any other environment must use `AUTH_MODE=jwt`, provide `JWT_SECRET`, and send a bearer JWT with `sub`, `exp`, `role`, and optionally `name`. Supported roles are:
+
+| Role | Access |
+|---|---|
+| `viewer` | Read jobs, evidence, and documents |
+| `operator` | Viewer access plus invoice upload |
+| `reviewer` | Viewer access plus review resolution and failed-job retry |
+| `admin` | All access, including purchase-order import and demo seed |
+
+Invoice uploads are streamed to an OS quarantine file while hashing. The server ignores the supplied media type and storage name, verifies `%PDF-` magic and PyMuPDF parseability, rejects encrypted files, and enforces `MAX_UPLOAD_BYTES`, `MAX_PDF_PAGES`, and `MAX_RENDER_PIXELS` before creating any database state. This is format validation and resource limiting, not antivirus or malware scanning.
+
+PDFs are available only through the authenticated document API. Responses use private/no-store caching, content sniffing protection, a safe server-sanitized download name, and sandbox-oriented headers.
 
 ## API endpoints
 
 | Endpoint | Purpose |
 |---|---|
+| `GET /api/auth/me` | Server-derived authenticated actor |
 | `POST /api/purchase-orders/import` | Upload PO master CSV (upsert by `po_number`) |
 | `POST /api/invoices/upload` | Upload invoice PDF and queue work (202) |
 | `GET /api/jobs` | Dashboard history |

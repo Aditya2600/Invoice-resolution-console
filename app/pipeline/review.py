@@ -36,6 +36,8 @@ def resolve_review(
     note: str,
     selected_po_number: str | None = None,
     corrections: dict[str, Any] | None = None,
+    actor_id: str | None = None,
+    actor_role: str | None = None,
 ) -> dict[str, Any]:
     detail = repository.get_job_detail(job_id)
     if not detail:
@@ -56,6 +58,8 @@ def resolve_review(
     snapshot = result.get("policy_snapshot") or build_policy_snapshot(extraction.vendor_name)
     review_action = {
         "reviewer_name": reviewer_name,
+        "actor_id": actor_id,
+        "actor_role": actor_role,
         "action": action,
         "selected_po_number": selected_po_number,
         "corrections": corrections,

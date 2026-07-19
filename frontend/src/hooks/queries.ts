@@ -21,6 +21,15 @@ export const jobKeys = {
   detail: (jobId: string) => ["jobs", "detail", jobId] as const,
 };
 
+export function useAuthenticatedActor() {
+  return useQuery({
+    queryKey: ["auth", "actor"],
+    queryFn: api.currentActor,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+  });
+}
+
 /** Polls only while at least one run is still PENDING or PROCESSING. */
 export function useJobs(limit = 200) {
   return useQuery<JobListItem[]>({
