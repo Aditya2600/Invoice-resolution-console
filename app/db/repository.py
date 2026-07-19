@@ -145,8 +145,14 @@ def list_jobs(limit: int = 50) -> list[dict[str, Any]]:
             cur.execute(
                 """
                 SELECT j.job_id, j.document_id, d.file_name, j.status, j.decision_status,
-                       j.attempts, j.created_at, j.updated_at
-                FROM invoice_jobs j JOIN invoice_documents d ON d.document_id = j.document_id
+                       j.attempts, j.created_at, j.updated_at,
+                       r.extraction->>'vendor_name' AS vendor_name,
+                       r.extraction->>'total'       AS total,
+                       r.extraction->>'currency'    AS currency
+                FROM invoice_jobs j
+                JOIN invoice_documents d ON d.document_id = j.document_id
+                -- LEFT so in-flight runs, which have no result row yet, still list.
+                LEFT JOIN invoice_results r ON r.job_id = j.job_id
                 ORDER BY j.created_at DESC LIMIT %s
                 """,
                 (limit,),
@@ -164,7 +170,20 @@ def get_job_detail(job_id: str) -> dict[str, Any] | None:
             events = list(cur.fetchall())
             cur.execute("SELECT * FROM invoice_results WHERE job_id = %s", (job_id,))
             result = cur.fetchone()
-    return {"job": job, "events": events, "result": result}
+            cur.execute("SELECT * FROM invoice_review_actions WHERE job_id = %s ORDER BY id", (job_id,))
+            review_actions = list(cur.fetchall())
+            cur.execute(
+                "SELECT * FROM po_invoice_allocations WHERE job_id = %s ORDER BY created_at",
+                (job_id,),
+            )
+            allocations = list(cur.fetchall())
+    return {
+        "job": job,
+        "events": events,
+        "result": result,
+        "review_actions": review_actions,
+        "allocations": allocations,
+    }
 
 
 def log_event(
@@ -189,7 +208,226 @@ def log_event(
         conn.commit()
 
 
-def complete_job(
+class ReviewConflict(RuntimeError):
+    """The job is no longer awaiting review, so this resolution cannot be applied."""
+
+
+def _insert_event(cur, job_id: str, stage: str, status: str, reason: str | None, ms: float | None, data: dict[str, Any]) -> None:
+    cur.execute(
+        """
+        INSERT INTO invoice_events (job_id, stage, status, reason, ms, metrics, data)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        (job_id, stage, status, reason, ms, _json({}), _json(data)),
+    )
+
+
+def finalize_invoice_decision(
+    *,
+    job_id: str,
+    document_id: str,
+    decision_status: str,
+    extraction: dict[str, Any],
+    matched_po: dict[str, Any] | None,
+    reasons: list[str],
+    rule_checks: dict[str, Any],
+    model_name: str | None = None,
+    model_latency_ms: float | None = None,
+    allocation_amount: Decimal | None = None,
+    total_ms: float | None = None,
+    review_action: dict[str, Any] | None = None,
+    policy_snapshot: dict[str, Any] | None = None,
+    policy_hash: str | None = None,
+) -> dict[str, Any]:
+    """Consume PO balance, write the result, close the job and its audit trail in one transaction.
+
+    When the purchase-order balance no longer covers the invoice at commit time, the decision is
+    downgraded to NEEDS_REVIEW: no allocation is created and no balance is consumed. Either the
+    whole finalization lands or none of it does.
+    """
+    final_status = decision_status
+    final_reasons = list(reasons)
+    checks = dict(rule_checks)
+    allocation_id: str | None = None
+
+    with connection() as conn:
+        with conn.cursor() as cur:
+            if review_action is not None:
+                cur.execute(
+                    "SELECT decision_status FROM invoice_jobs WHERE job_id = %s FOR UPDATE",
+                    (job_id,),
+                )
+                current = cur.fetchone()
+                if not current:
+                    raise ReviewConflict("Job not found.")
+                if current["decision_status"] != "NEEDS_REVIEW":
+                    raise ReviewConflict(
+                        f"This invoice is already resolved as {current['decision_status']}."
+                    )
+
+            if final_status == "APPROVED" and matched_po and allocation_amount is not None:
+                cur.execute(
+                    "SELECT total_amount, consumed_amount, status FROM purchase_orders WHERE po_number = %s FOR UPDATE",
+                    (matched_po["po_number"],),
+                )
+                po = cur.fetchone()
+                cur.execute(
+                    "SELECT allocation_id FROM po_invoice_allocations WHERE document_id = %s AND status = 'ACTIVE'",
+                    (document_id,),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    # Already consumed by an earlier finalization; never double-consume.
+                    allocation_id = existing["allocation_id"]
+                    checks["atomic_po_reservation"] = {"passed": True, "allocation_id": allocation_id}
+                elif not po or po["status"].upper() != "OPEN" or po["total_amount"] - po["consumed_amount"] < allocation_amount:
+                    final_status = "NEEDS_REVIEW"
+                    final_reasons = [
+                        *final_reasons,
+                        "Purchase-order balance changed while processing; reviewer must recheck the invoice.",
+                    ]
+                    checks["atomic_po_reservation"] = {"passed": False}
+                else:
+                    allocation_id = str(uuid.uuid4())
+                    cur.execute(
+                        """
+                        INSERT INTO po_invoice_allocations
+                          (allocation_id, po_number, document_id, job_id, amount, status)
+                        VALUES (%s, %s, %s, %s, %s, 'ACTIVE')
+                        """,
+                        (allocation_id, matched_po["po_number"], document_id, job_id, allocation_amount),
+                    )
+                    cur.execute(
+                        """
+                        UPDATE purchase_orders
+                        SET consumed_amount = consumed_amount + %s, updated_at = now()
+                        WHERE po_number = %s
+                        """,
+                        (allocation_amount, matched_po["po_number"]),
+                    )
+                    checks["atomic_po_reservation"] = {"passed": True, "allocation_id": allocation_id}
+
+            _write_result_and_close(
+                cur,
+                job_id=job_id,
+                document_id=document_id,
+                decision_status=final_status,
+                extraction=extraction,
+                matched_po=matched_po,
+                reasons=final_reasons,
+                rule_checks=checks,
+                model_name=model_name,
+                model_latency_ms=model_latency_ms,
+                policy_snapshot=policy_snapshot,
+                policy_hash=policy_hash,
+            )
+
+            # APPROVED locks the identity for good; a rejection frees it for a corrected
+            # re-upload; NEEDS_REVIEW keeps the claim PENDING until a human resolves it.
+            if final_status == "APPROVED":
+                _settle_identity_claim(cur, document_id, state="FINAL", reason=None)
+            elif final_status == "REJECTED":
+                _settle_identity_claim(
+                    cur, document_id, state="RELEASED", reason=f"Invoice {final_status.lower()}."
+                )
+
+            if review_action is not None:
+                cur.execute(
+                    """
+                    INSERT INTO invoice_review_actions
+                      (job_id, reviewer_name, action, selected_po_number, corrections, note,
+                       decision_before, decision_after)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        job_id,
+                        review_action["reviewer_name"],
+                        review_action["action"],
+                        review_action.get("selected_po_number"),
+                        _json(review_action.get("corrections") or {}),
+                        review_action["note"],
+                        review_action.get("decision_before"),
+                        final_status,
+                    ),
+                )
+                _insert_event(
+                    cur,
+                    job_id,
+                    "stage_review_resolve",
+                    "PASS",
+                    f"{review_action['reviewer_name']} chose to {review_action['action'].lower()} this invoice.",
+                    None,
+                    {
+                        "reviewer_name": review_action["reviewer_name"],
+                        "action": review_action["action"],
+                        "note": review_action["note"],
+                        "selected_po_number": review_action.get("selected_po_number"),
+                        "corrections": review_action.get("corrections") or {},
+                        "decision_before": review_action.get("decision_before"),
+                        "decision_after": final_status,
+                    },
+                )
+
+            _insert_event(
+                cur,
+                job_id,
+                "stage_policy_validate",
+                "PASS" if final_status == "APPROVED" else "INFO",
+                "; ".join(final_reasons),
+                None,
+                {
+                    "decision": {
+                        "status": final_status,
+                        "reasons": final_reasons,
+                        "matched_po": matched_po,
+                        "rule_checks": checks,
+                    },
+                    "allocation_id": allocation_id,
+                    "policy_version": (policy_snapshot or {}).get("policy_version"),
+                    "policy_hash": policy_hash,
+                },
+            )
+            _insert_event(
+                cur,
+                job_id,
+                "invoice_closed",
+                "PASS",
+                f"Invoice processing completed as {final_status}.",
+                total_ms,
+                {},
+            )
+        conn.commit()
+
+    return {
+        "decision_status": final_status,
+        "reasons": final_reasons,
+        "rule_checks": checks,
+        "allocation_id": allocation_id,
+    }
+
+
+def list_allocations(job_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM po_invoice_allocations WHERE job_id = %s ORDER BY created_at",
+                (job_id,),
+            )
+            return list(cur.fetchall())
+
+
+def list_review_actions(job_id: str) -> list[dict[str, Any]]:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM invoice_review_actions WHERE job_id = %s ORDER BY id",
+                (job_id,),
+            )
+            return list(cur.fetchall())
+
+
+def _write_result_and_close(
+    cur,
     *,
     job_id: str,
     document_id: str,
@@ -200,15 +438,15 @@ def complete_job(
     rule_checks: dict[str, Any],
     model_name: str | None,
     model_latency_ms: float | None,
+    policy_snapshot: dict[str, Any] | None = None,
+    policy_hash: str | None = None,
 ) -> None:
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
+    cur.execute(
                 """
                 INSERT INTO invoice_results
                   (document_id, job_id, decision_status, extraction, matched_po, reasons,
-                   rule_checks, model_name, model_latency_ms)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                   rule_checks, model_name, model_latency_ms, policy_snapshot, policy_hash)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (document_id) DO UPDATE SET
                   decision_status = EXCLUDED.decision_status,
                   extraction = EXCLUDED.extraction,
@@ -217,6 +455,8 @@ def complete_job(
                   rule_checks = EXCLUDED.rule_checks,
                   model_name = EXCLUDED.model_name,
                   model_latency_ms = EXCLUDED.model_latency_ms,
+                  policy_snapshot = EXCLUDED.policy_snapshot,
+                  policy_hash = EXCLUDED.policy_hash,
                   updated_at = now()
                 """,
                 (
@@ -229,24 +469,28 @@ def complete_job(
                     _json(rule_checks),
                     model_name,
                     model_latency_ms,
+                    _json(policy_snapshot) if policy_snapshot else None,
+                    policy_hash,
                 ),
-            )
-            cur.execute(
-                """
-                UPDATE invoice_jobs
-                SET status = 'COMPLETED', decision_status = %s, lease_until = NULL,
-                    last_error = NULL, updated_at = now()
-                WHERE job_id = %s
-                """,
-                (decision_status, job_id),
-            )
-        conn.commit()
+    )
+    cur.execute(
+        """
+        UPDATE invoice_jobs
+        SET status = 'COMPLETED', decision_status = %s, lease_until = NULL,
+            last_error = NULL, updated_at = now()
+        WHERE job_id = %s
+        """,
+        (decision_status, job_id),
+    )
 
 
 def fail_job(job_id: str, error: str) -> None:
     with connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT attempts, max_attempts FROM invoice_jobs WHERE job_id = %s", (job_id,))
+            cur.execute(
+                "SELECT attempts, max_attempts, document_id FROM invoice_jobs WHERE job_id = %s",
+                (job_id,),
+            )
             job = cur.fetchone()
             if not job:
                 return
@@ -259,6 +503,11 @@ def fail_job(job_id: str, error: str) -> None:
                 """,
                 (status, error[:2000], job_id),
             )
+            if status == "FAILED":
+                # The run never reached a decision, so it must not hold the identity hostage.
+                _settle_identity_claim(
+                    cur, job["document_id"], state="RELEASED", reason="Processing failed."
+                )
         conn.commit()
 
 
@@ -346,30 +595,20 @@ def find_purchase_orders(*, po_number: str | None, vendor_name: str | None) -> l
             ]
 
 
-def reserve_po_amount(po_number: str, amount: Decimal) -> bool:
-    """Atomically reserve the approved amount to avoid concurrent over-allocation."""
-    with connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE purchase_orders
-                SET consumed_amount = consumed_amount + %s, updated_at = now()
-                WHERE po_number = %s
-                  AND status = 'OPEN'
-                  AND total_amount - consumed_amount >= %s
-                RETURNING po_number
-                """,
-                (amount, po_number, amount),
-            )
-            reserved = cur.fetchone() is not None
-        conn.commit()
-        return reserved
-
-
 def claim_semantic_invoice(
-    *, document_id: str, vendor_name: str, invoice_number: str, total: Decimal | None
+    *,
+    document_id: str,
+    job_id: str | None = None,
+    vendor_name: str,
+    invoice_number: str,
+    total: Decimal | None,
 ) -> dict[str, Any] | None:
-    """Return a prior invoice identity when this is a semantic duplicate; otherwise claim it."""
+    """Claim the vendor/invoice-number identity, or describe the live claim that blocks it.
+
+    The partial unique index on (vendor, invoice number) WHERE state IN ('PENDING','FINAL') is what
+    makes this race-safe: two workers racing on the same identity, only one insert survives and the
+    loser reads the winner's claim.
+    """
     vendor = normalize_name(vendor_name)
     invoice = normalize_invoice_number(invoice_number)
     if not vendor or not invoice:
@@ -378,13 +617,16 @@ def claim_semantic_invoice(
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO invoice_duplicates
-                  (vendor_normalized, invoice_number_normalized, first_document_id, first_total)
-                VALUES (%s, %s, %s, %s)
-                ON CONFLICT (vendor_normalized, invoice_number_normalized) DO NOTHING
-                RETURNING first_document_id, first_total
+                INSERT INTO invoice_identity_claims
+                  (claim_id, vendor_normalized, invoice_number_normalized, document_id, job_id,
+                   invoice_total, state)
+                VALUES (%s, %s, %s, %s, %s, %s, 'PENDING')
+                ON CONFLICT (vendor_normalized, invoice_number_normalized)
+                    WHERE state IN ('PENDING', 'FINAL')
+                DO NOTHING
+                RETURNING claim_id
                 """,
-                (vendor, invoice, document_id, total),
+                (str(uuid.uuid4()), vendor, invoice, document_id, job_id, total),
             )
             inserted = cur.fetchone()
             if inserted:
@@ -392,14 +634,118 @@ def claim_semantic_invoice(
                 return None
             cur.execute(
                 """
-                SELECT first_document_id, first_total
-                FROM invoice_duplicates
+                SELECT document_id AS first_document_id, invoice_total AS first_total, state, claim_id
+                FROM invoice_identity_claims
                 WHERE vendor_normalized = %s AND invoice_number_normalized = %s
+                  AND state IN ('PENDING', 'FINAL')
                 """,
                 (vendor, invoice),
             )
             prior = cur.fetchone()
         conn.commit()
         if prior and prior["first_document_id"] == document_id:
+            # This document already holds the identity, e.g. a retried run. Not a duplicate.
             return None
         return prior
+
+
+def _settle_identity_claim(cur, document_id: str, *, state: str, reason: str | None) -> None:
+    """Move this document's live claim to FINAL or RELEASED. NEEDS_REVIEW keeps it PENDING."""
+    if state == "FINAL":
+        cur.execute(
+            """
+            UPDATE invoice_identity_claims
+            SET state = 'FINAL', finalized_at = now(), released_at = NULL, release_reason = NULL
+            WHERE document_id = %s AND state = 'PENDING'
+            """,
+            (document_id,),
+        )
+        return
+    cur.execute(
+        """
+        UPDATE invoice_identity_claims
+        SET state = 'RELEASED', released_at = now(), release_reason = %s
+        WHERE document_id = %s AND state IN ('PENDING', 'FINAL')
+        """,
+        (reason, document_id),
+    )
+
+
+def release_identity_claim(document_id: str, reason: str) -> None:
+    """Free the identity so a corrected re-upload can claim it."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            _settle_identity_claim(cur, document_id, state="RELEASED", reason=reason)
+        conn.commit()
+
+
+def get_identity_claim(document_id: str) -> dict[str, Any] | None:
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT * FROM invoice_identity_claims
+                WHERE document_id = %s ORDER BY created_at DESC LIMIT 1
+                """,
+                (document_id,),
+            )
+            return cur.fetchone()
+
+
+class RetryConflict(RuntimeError):
+    """Only a FAILED job may be retried."""
+
+
+def retry_job(job_id: str, *, requested_by: str, note: str | None = None) -> dict[str, Any]:
+    """Re-queue a failed job under a new retry generation, preserving all history.
+
+    Attempts reset so the new run gets a full budget; retry_generation and manual_retry_count
+    only ever increase, so the audit trail of how often a job was re-run survives.
+    """
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, decision_status, retry_generation FROM invoice_jobs WHERE job_id = %s FOR UPDATE",
+                (job_id,),
+            )
+            job = cur.fetchone()
+            if not job:
+                raise LookupError("Job not found.")
+            if job["status"] != "FAILED":
+                raise RetryConflict(
+                    f"Only a failed run can be retried; this one is {job['decision_status'] or job['status']}."
+                )
+            cur.execute(
+                """
+                UPDATE invoice_jobs
+                SET status = 'PENDING',
+                    attempts = 0,
+                    retry_generation = retry_generation + 1,
+                    manual_retry_count = manual_retry_count + 1,
+                    last_retry_at = now(),
+                    last_retry_by = %s,
+                    lease_until = NULL,
+                    last_error = NULL,
+                    updated_at = now()
+                WHERE job_id = %s
+                RETURNING retry_generation, manual_retry_count
+                """,
+                (requested_by, job_id),
+            )
+            updated = cur.fetchone()
+            _insert_event(
+                cur,
+                job_id,
+                "stage_retry_requested",
+                "INFO",
+                f"{requested_by} re-queued this invoice for processing.",
+                None,
+                {
+                    "requested_by": requested_by,
+                    "note": note,
+                    "retry_generation": updated["retry_generation"],
+                    "manual_retry_count": updated["manual_retry_count"],
+                },
+            )
+        conn.commit()
+    return {"job_id": job_id, **updated}

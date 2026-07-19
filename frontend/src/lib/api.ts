@@ -2,6 +2,11 @@ import type {
   ImportPurchaseOrdersResponse,
   JobDetail,
   JobListItem,
+  PurchaseOrder,
+  RetryJobRequest,
+  RetryJobResponse,
+  ResolveReviewRequest,
+  ResolveReviewResponse,
   UploadInvoiceResponse,
 } from "./types";
 
@@ -87,6 +92,20 @@ export function uploadInvoiceWithProgress(
 export const api = {
   listJobs: (limit = 200) => request<{ jobs: JobListItem[] }>(`/jobs?limit=${limit}`).then((body) => body.jobs),
   getJob: (jobId: string) => request<JobDetail>(`/jobs/${jobId}`),
+  reviewCandidates: (jobId: string) =>
+    request<{ candidates: PurchaseOrder[] }>(`/jobs/${jobId}/review/candidates`).then((body) => body.candidates),
+  resolveReview: (jobId: string, body: ResolveReviewRequest) =>
+    request<ResolveReviewResponse>(`/jobs/${jobId}/review/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  retryJob: (jobId: string, body: RetryJobRequest) =>
+    request<RetryJobResponse>(`/jobs/${jobId}/retry`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   uploadInvoice: (file: File) => upload<UploadInvoiceResponse>("/invoices/upload", file),
   importPurchaseOrders: (file: File) => upload<ImportPurchaseOrdersResponse>("/purchase-orders/import", file),
   seedPurchaseOrders: () =>

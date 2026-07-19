@@ -107,6 +107,91 @@ CREATE TABLE IF NOT EXISTS invoice_results (
     model_latency_ms DOUBLE PRECISION,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS po_invoice_allocations (
+    allocation_id TEXT PRIMARY KEY,
+    po_number TEXT NOT NULL REFERENCES purchase_orders(po_number) ON DELETE RESTRICT,
+    document_id TEXT NOT NULL REFERENCES invoice_documents(document_id) ON DELETE CASCADE,
+    job_id TEXT NOT NULL REFERENCES invoice_jobs(job_id) ON DELETE CASCADE,
+    amount NUMERIC(14, 2) NOT NULL,
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'RELEASED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    released_at TIMESTAMPTZ
+);
+
+-- One live allocation per document: a document can never consume PO balance twice.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_po_allocations_active_document
+    ON po_invoice_allocations (document_id) WHERE status = 'ACTIVE';
+
+CREATE INDEX IF NOT EXISTS idx_po_allocations_po
+    ON po_invoice_allocations (po_number, status);
+
+CREATE TABLE IF NOT EXISTS invoice_review_actions (
+    id BIGSERIAL PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES invoice_jobs(job_id) ON DELETE CASCADE,
+    reviewer_name TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('APPROVE', 'REJECT')),
+    selected_po_number TEXT,
+    corrections JSONB NOT NULL DEFAULT '{}'::jsonb,
+    note TEXT NOT NULL,
+    decision_before TEXT,
+    decision_after TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_invoice_review_actions_job
+    ON invoice_review_actions (job_id, id);
+
+-- Vendor + invoice-number identity with a lifecycle. invoice_duplicates is kept for
+-- compatibility and is backfilled below; this ledger is the live source of truth.
+CREATE TABLE IF NOT EXISTS invoice_identity_claims (
+    claim_id TEXT PRIMARY KEY,
+    vendor_normalized TEXT NOT NULL,
+    invoice_number_normalized TEXT NOT NULL,
+    document_id TEXT NOT NULL REFERENCES invoice_documents(document_id) ON DELETE CASCADE,
+    job_id TEXT REFERENCES invoice_jobs(job_id) ON DELETE SET NULL,
+    invoice_total NUMERIC(14, 2),
+    state TEXT NOT NULL DEFAULT 'PENDING' CHECK (state IN ('PENDING', 'FINAL', 'RELEASED')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finalized_at TIMESTAMPTZ,
+    released_at TIMESTAMPTZ,
+    release_reason TEXT
+);
+
+-- Only one live claim per identity, so two workers cannot both hold it. RELEASED rows are
+-- excluded, which is what lets a corrected re-upload claim the identity again.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_identity_claims_active
+    ON invoice_identity_claims (vendor_normalized, invoice_number_normalized)
+    WHERE state IN ('PENDING', 'FINAL');
+
+CREATE INDEX IF NOT EXISTS idx_identity_claims_document
+    ON invoice_identity_claims (document_id, state);
+
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS retry_generation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS manual_retry_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_at TIMESTAMPTZ;
+ALTER TABLE invoice_jobs ADD COLUMN IF NOT EXISTS last_retry_by TEXT;
+
+ALTER TABLE invoice_results ADD COLUMN IF NOT EXISTS policy_snapshot JSONB;
+ALTER TABLE invoice_results ADD COLUMN IF NOT EXISTS policy_hash TEXT;
+
+-- Historical duplicates become FINAL claims. Deterministic claim_id keeps this a no-op on
+-- every later startup; DO NOTHING also absorbs identities already claimed by the live ledger.
+INSERT INTO invoice_identity_claims
+  (claim_id, vendor_normalized, invoice_number_normalized, document_id, job_id,
+   invoice_total, state, finalized_at)
+SELECT
+    'backfill:' || d.vendor_normalized || '|' || d.invoice_number_normalized,
+    d.vendor_normalized,
+    d.invoice_number_normalized,
+    d.first_document_id,
+    (SELECT j.job_id FROM invoice_jobs j WHERE j.document_id = d.first_document_id
+     ORDER BY j.created_at LIMIT 1),
+    d.first_total,
+    'FINAL',
+    d.first_seen_at
+FROM invoice_duplicates d
+ON CONFLICT DO NOTHING;
 """
 
 

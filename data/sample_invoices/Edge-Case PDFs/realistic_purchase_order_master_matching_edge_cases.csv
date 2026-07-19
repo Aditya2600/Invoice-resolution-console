@@ -1,0 +1,4 @@
+po_number,vendor_name,currency,total_amount,consumed_amount,status
+PO-AFS-2026-0417,Northstar Industrial Supplies Pvt. Ltd.,INR,100000.00,0.00,OPEN
+PO-AFS-2026-0521,Northstar Industrial Supplies Pvt. Ltd.,INR,150000.00,78000.00,OPEN
+PO-AFS-2026-0608,Northstar Industrial Supplies Pvt. Ltd.,INR,100000.00,34500.00,OPEN

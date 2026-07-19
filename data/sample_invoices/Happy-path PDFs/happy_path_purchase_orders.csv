@@ -1,0 +1,5 @@
+po_number,vendor_name,currency,total_amount,consumed_amount,status
+PO-HAPPY-1001,BluePeak Office Supplies Pvt Ltd,INR,17700.00,0.00,OPEN
+PO-HAPPY-1002,Stellar IT Services Private Limited,INR,37760.00,0.00,OPEN
+PO-HAPPY-1003,Meridian Facilities Management,INR,10266.00,0.00,OPEN
+PO-HAPPY-1004,Anika Packaging Solutions Pvt Ltd,INR,14750.00,0.00,OPEN

@@ -15,9 +15,7 @@ export function Settings() {
         The rules every invoice runs through.
       </h1>
       <p className="mt-6 max-w-2xl text-foreground/70">
-        These are the per-vendor tolerances the decision engine enforces server-side. Editing is deliberately disabled
-        here — the console never mutates policy. Change <code className="font-mono">config/vendor_rules.json</code> and
-        restart the worker instead.
+        Enforced server-side. Edit <code className="font-mono">config/vendor_rules.json</code> and restart the worker.
       </p>
 
       <div className="mt-6 inline-flex items-center gap-2 mono-label rounded-full border border-divider bg-panel px-3 h-7">
@@ -71,7 +69,7 @@ export function Settings() {
             </div>
             <div>
               <div className="mono-label opacity-70">POLL CADENCE</div>
-              <div className="mt-1 font-mono text-sm">2500 ms while any job is PENDING or PROCESSING</div>
+              <div className="mt-1 font-mono text-sm">2500 ms while jobs are active</div>
             </div>
           </div>
         </div>

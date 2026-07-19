@@ -36,10 +36,6 @@ export function Dashboard() {
         <h1 className="mt-4 text-5xl md:text-7xl font-semibold tracking-tight leading-[0.95] max-w-4xl">
           Invoice resolution, run end-to-end.
         </h1>
-        <p className="mt-6 max-w-2xl text-lg text-foreground/70">
-          Upload invoices, match them against your purchase-order master, and close each one out. Extraction is
-          model-assisted; every financial decision stays deterministic and auditable.
-        </p>
         <div className="mt-8 flex flex-wrap gap-3">
           <Button asChild className="rounded-full bg-foreground text-background hover:bg-foreground/90 h-11 px-5">
             <Link to="/process">
@@ -65,8 +61,8 @@ export function Dashboard() {
 
       <section className="py-10">
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <KpiTile label="In flight" value={kpis.processing} tone="electric" hint="Polls every 2.5s while active" />
-          <KpiTile label="Needs review" value={kpis.review} tone="warning" hint="Awaiting a human call" />
+          <KpiTile label="In flight" value={kpis.processing} tone="electric" />
+          <KpiTile label="Needs review" value={kpis.review} tone="warning" />
           <KpiTile label="Approved" value={kpis.approved} />
           <KpiTile label="Rejected" value={kpis.rejected} />
         </div>
@@ -86,7 +82,7 @@ export function Dashboard() {
           <h2 className="mt-4 text-3xl md:text-5xl font-semibold tracking-tight max-w-3xl">
             {needsReview.length > 0
               ? `${needsReview.length} invoice${needsReview.length === 1 ? "" : "s"} paused for a human call.`
-              : "Nothing paused. Anything the policy engine can't decide will surface here."}
+              : "Nothing paused."}
           </h2>
           {needsReview.length > 0 && (
             <div className="mt-8 grid md:grid-cols-2 gap-3">

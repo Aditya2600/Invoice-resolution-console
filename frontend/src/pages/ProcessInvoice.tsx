@@ -15,9 +15,9 @@ import { cn } from "@/lib/utils";
 export function ProcessInvoice() {
   return (
     <div className="mx-auto max-w-7xl px-5 md:px-8 py-10">
-      <div className="mono-label text-muted-foreground">PROCESS · TWO-STAGE INTAKE</div>
+      <div className="mono-label text-muted-foreground">PROCESS</div>
       <h1 className="mt-3 text-5xl md:text-6xl font-semibold tracking-tight leading-[0.95] max-w-3xl">
-        Give context once. The worker runs the rest.
+        Process invoices
       </h1>
       <div className="mt-10 grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <PoMasterStage />
@@ -58,9 +58,6 @@ function PoMasterStage() {
         STAGE ONE · PO MASTER
       </div>
       <h2 className="mt-4 text-2xl font-semibold tracking-tight">Import purchase-order master</h2>
-      <p className="mt-2 text-foreground/70 text-sm">
-        Upload a CSV of PO numbers, vendors, totals and consumed amounts. Every invoice is matched against it.
-      </p>
 
       <div
         onDragOver={(event) => event.preventDefault()}
@@ -199,9 +196,6 @@ function InvoicesStage() {
         STAGE TWO · INVOICES
       </div>
       <h2 className="mt-4 text-2xl font-semibold tracking-tight">Queue invoice PDFs</h2>
-      <p className="mt-2 text-foreground/70 text-sm">
-        Add as many PDFs as you like. Each one is uploaded on its own with real progress and becomes its own durable job.
-      </p>
 
       <div
         onDragOver={(event) => event.preventDefault()}
@@ -241,7 +235,7 @@ function InvoicesStage() {
 
       {running && (
         <div className="mt-6">
-          <ProcessingPanel detail="Each PDF is validated, text-extracted, matched against your POs and run through policy — one invoice at a time." />
+          <ProcessingPanel />
         </div>
       )}
 
@@ -320,7 +314,7 @@ function InvoicesStage() {
                       <AlertCircle className="size-4 text-destructive shrink-0 mt-0.5" aria-hidden />
                       <div>
                         <span className="text-destructive font-medium">Upload failed · </span>
-                        {item.message} Press Start again to retry this file.
+                        {item.message}
                       </div>
                     </div>
                   </div>

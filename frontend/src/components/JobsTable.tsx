@@ -6,13 +6,13 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DecisionPill, StatusPill } from "@/components/StatusPill";
 import { RowSkeleton } from "@/components/QueryState";
-import { formatRelative } from "@/lib/format";
+import { formatMoney, formatRelative } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { JobListItem } from "@/lib/types";
 import { useUiStore } from "@/store/ui";
 
 /** Written out in full because Tailwind only picks up class names that appear literally in source. */
-const GRID = "md:grid-cols-[minmax(0,1fr)_140px_160px_100px_160px_60px]";
+const GRID = "md:grid-cols-[minmax(0,1fr)_180px_140px_160px_140px_60px]";
 
 export function JobsTable({ jobs, loading }: { jobs: JobListItem[]; loading?: boolean }) {
   const { search, statusFilter, decisionFilter, setSearch, setStatusFilter, setDecisionFilter } = useUiStore();
@@ -69,9 +69,9 @@ export function JobsTable({ jobs, loading }: { jobs: JobListItem[]; loading?: bo
       <div className="border-t border-divider">
         <div className={cn("hidden md:grid gap-4 mono-label text-muted-foreground py-3 border-b border-divider", GRID)}>
           <div>Filename</div>
+          <div>Vendor / Total</div>
           <div>Status</div>
           <div>Decision</div>
-          <div className="text-right">Attempts</div>
           <div>Updated</div>
           <div />
         </div>
@@ -109,13 +109,25 @@ export function JobsTable({ jobs, loading }: { jobs: JobListItem[]; loading?: bo
                 {job.file_name}
                 <span className="ml-2 mono-label text-muted-foreground md:hidden">{formatRelative(job.updated_at)}</span>
               </Link>
+              {/* Null until the run produces an extraction, so in-flight rows stay quiet. */}
+              <div className="min-w-0">
+                {job.vendor_name || job.total ? (
+                  <>
+                    <div className="text-sm truncate">{job.vendor_name ?? "—"}</div>
+                    <div className="font-mono text-xs text-muted-foreground tabular-nums">
+                      {formatMoney(job.total, job.currency)}
+                    </div>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground text-sm">—</span>
+                )}
+              </div>
               <div>
                 <StatusPill status={job.status} />
               </div>
               <div>
                 <DecisionPill decision={job.decision_status} />
               </div>
-              <div className="mono-label md:text-right tabular-nums">×{job.attempts}</div>
               <div className="mono-label text-muted-foreground hidden md:block">{formatRelative(job.updated_at)}</div>
               <Link
                 to={`/runs/${job.job_id}`}

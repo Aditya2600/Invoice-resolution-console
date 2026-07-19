@@ -110,8 +110,7 @@ export function AppShell() {
       </main>
       <footer className="border-t border-divider mt-16">
         <div className="mx-auto max-w-7xl px-5 md:px-8 py-8 flex flex-col md:flex-row md:items-center justify-between gap-3">
-          <div className="mono-label text-muted-foreground">INVOICE RESOLUTION · OPERATIONS CONSOLE</div>
-          <div className="mono-label text-muted-foreground">PDF · MEDHA · PO MATCH · POLICY</div>
+          <div className="mono-label text-muted-foreground">INVOICE RESOLUTION CONSOLE</div>
         </div>
       </footer>
     </div>

@@ -30,13 +30,13 @@ export const STAGE_ORDER: StageName[] = [
 
 export const STAGE_LABELS: Record<StageName, string> = {
   invoice_received: "Invoice received",
-  stage_pdf_validate: "PDF validate",
-  stage_text_extract: "Text extract",
-  stage_ocr_fallback: "OCR fallback",
-  stage_medha_extract: "MEDHA field extract",
-  stage_semantic_duplicate: "Semantic duplicate check",
-  stage_po_match: "Purchase-order match",
-  stage_policy_validate: "Policy validate",
+  stage_pdf_validate: "Document validated",
+  stage_text_extract: "Text extracted",
+  stage_ocr_fallback: "Scanned pages read",
+  stage_medha_extract: "Invoice data extracted",
+  stage_semantic_duplicate: "Duplicate check",
+  stage_po_match: "Purchase order lookup",
+  stage_policy_validate: "Validation",
   invoice_closed: "Invoice closed",
 };
 
@@ -49,6 +49,10 @@ export interface JobListItem {
   attempts: number;
   created_at: string;
   updated_at: string;
+  /** Read off the result row, so null until the run produces an extraction. */
+  vendor_name: string | null;
+  total: string | null;
+  currency: string | null;
 }
 
 /** GET /api/jobs/{id} returns the joined job row, so it carries document columns too. */
@@ -60,6 +64,10 @@ export interface JobRow extends JobListItem {
   storage_key: string;
   sha256: string;
   page_count: number | null;
+  retry_generation: number;
+  manual_retry_count: number;
+  last_retry_at: string | null;
+  last_retry_by: string | null;
 }
 
 export interface InvoiceEvent {
@@ -128,13 +136,80 @@ export interface InvoiceResultRow {
   rule_checks: Record<string, RuleCheck>;
   model_name: string | null;
   model_latency_ms: number | null;
+  policy_snapshot: PolicySnapshot | null;
+  policy_hash: string | null;
   updated_at: string;
+}
+
+/** The rule values a decision was actually made under, frozen at finalization. */
+export interface PolicySnapshot {
+  policy_version: string;
+  vendor_normalized: string | null;
+  amount_tolerance: string;
+  minimum_auto_approve_confidence: number;
+  require_po_number: boolean;
+  allowed_currencies: string[];
+}
+
+export interface PoAllocation {
+  allocation_id: string;
+  po_number: string;
+  document_id: string;
+  job_id: string;
+  amount: string;
+  status: "ACTIVE" | "RELEASED";
+  created_at: string;
+  released_at: string | null;
+}
+
+export interface ReviewActionRow {
+  id: number;
+  job_id: string;
+  reviewer_name: string;
+  action: ReviewAction;
+  selected_po_number: string | null;
+  corrections: Record<string, string | null>;
+  note: string;
+  decision_before: DecisionStatus | null;
+  decision_after: DecisionStatus | null;
+  created_at: string;
 }
 
 export interface JobDetail {
   job: JobRow;
   events: InvoiceEvent[];
   result: InvoiceResultRow | null;
+  review_actions: ReviewActionRow[];
+  allocations: PoAllocation[];
+}
+
+export type ReviewAction = "APPROVE" | "REJECT";
+
+export interface ResolveReviewRequest {
+  action: ReviewAction;
+  reviewer_name: string;
+  note: string;
+  selected_po_number?: string | null;
+  corrections?: Record<string, string> | null;
+}
+
+export interface ResolveReviewResponse {
+  message: string;
+  decision_status: DecisionStatus;
+  reasons: string[];
+  allocation_id: string | null;
+}
+
+export interface RetryJobRequest {
+  requested_by: string;
+  note?: string | null;
+}
+
+export interface RetryJobResponse {
+  message: string;
+  job_id: string;
+  retry_generation: number;
+  manual_retry_count: number;
 }
 
 export interface UploadInvoiceResponse {

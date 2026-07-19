@@ -1,32 +1,28 @@
-import { AlertTriangle, ChevronDown, ExternalLink, FileText, Info, Sparkles, XCircle } from "lucide-react";
+import { useState } from "react";
+import { AlertTriangle, CheckCircle2, ChevronDown, ExternalLink, Loader2, RotateCw, XCircle } from "lucide-react";
 import { motion, useReducedMotion } from "motion/react";
 import { Link, useParams } from "react-router-dom";
+import { toast } from "sonner";
 
-import { ProcessingPanel } from "@/components/ProcessingPanel";
+import { LiveRunStrip } from "@/components/LiveRunStrip";
+import { ReviewHistory, ReviewPanel } from "@/components/ReviewPanel";
 import { ErrorState } from "@/components/QueryState";
 import { RuleChecks } from "@/components/RuleChecks";
 import { StageTimeline } from "@/components/StageTimeline";
-import { DecisionPill, StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useJob } from "@/hooks/queries";
+import { useJob, useRetryJob } from "@/hooks/queries";
 import { api } from "@/lib/api";
 import { formatDate, formatDateTime, formatMoney, formatMs, formatPercent, isRunning } from "@/lib/format";
-import type {
-  DecisionStatus,
-  InvoiceEvent,
-  InvoiceResultRow,
-  JobDetail,
-  JobStatus,
-  RuleCheck,
-} from "@/lib/types";
+import type { InvoiceResultRow, JobDetail, JobRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useUiStore } from "@/store/ui";
 
 export function RunDetail() {
   const { jobId } = useParams<{ jobId: string }>();
-  const { data, isLoading, error, refetch } = useJob(jobId);
+  const { data, isLoading, error, refetch, dataUpdatedAt } = useJob(jobId);
 
   if (error) {
     return (
@@ -43,10 +39,10 @@ export function RunDetail() {
     return (
       <div className="mx-auto max-w-6xl px-5 md:px-8 py-12">
         <div className="mono-label text-muted-foreground">LOADING RUN</div>
-        <Skeleton className="mt-6 h-40 rounded-2xl" />
-        <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
-          <Skeleton className="h-96 rounded-2xl" />
-          <Skeleton className="h-96 rounded-2xl" />
+        <Skeleton className="mt-6 h-32 rounded-2xl" />
+        <div className="mt-6 grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
+          <Skeleton className="h-80 rounded-2xl" />
+          <Skeleton className="h-80 rounded-2xl" />
         </div>
       </div>
     );
@@ -65,25 +61,12 @@ export function RunDetail() {
         <span className="text-foreground truncate max-w-[240px]">{job.job_id}</span>
       </nav>
 
-      <header className="mt-5 flex flex-wrap items-end justify-between gap-4">
+      <header className="mt-4 flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <FileText className="size-4 text-foreground/50" aria-hidden />
-            <span className="mono-label text-muted-foreground">INVOICE</span>
-          </div>
-          <h1 className="mt-2 text-3xl md:text-5xl font-semibold tracking-tight break-words max-w-3xl">
-            {job.file_name}
-          </h1>
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <StatusPill status={job.status} />
-            <DecisionPill decision={job.decision_status} />
-            <span className="mono-label text-muted-foreground">ATTEMPTS ×{job.attempts}</span>
-            {job.page_count != null && (
-              <span className="mono-label text-muted-foreground">{job.page_count} PAGES</span>
-            )}
-            <span className="mono-label text-muted-foreground">CREATED {formatDateTime(job.created_at)}</span>
-            <span className="mono-label text-muted-foreground">POLICY {job.policy_version}</span>
-          </div>
+          <h1 className="text-2xl md:text-3xl font-semibold tracking-tight">{outcomeHeadline(job)}</h1>
+          <p className="mt-1 text-sm text-muted-foreground truncate max-w-xl" title={job.file_name}>
+            {job.file_name} · {formatDate(job.created_at)}
+          </p>
         </div>
         <Button asChild variant="outline" className="rounded-full border-foreground/20">
           <a href={api.documentFileUrl(job.document_id)} target="_blank" rel="noreferrer">
@@ -92,312 +75,400 @@ export function RunDetail() {
         </Button>
       </header>
 
-      <div className="mt-8">
+      <div className="mt-6">
         {running ? (
-          <ProcessingPanel detail={`The worker is processing ${job.file_name}. Stages update live below.`} />
+          <LiveRunStrip
+            events={events}
+            jobStatus={job.status}
+            createdAt={job.created_at}
+            updatedAt={dataUpdatedAt}
+          />
+        ) : job.decision_status === "NEEDS_REVIEW" && job.status === "COMPLETED" ? (
+          <ReviewPanel detail={data} />
         ) : (
-          <DecisionBanner status={job.status} decision={job.decision_status} result={result} lastError={job.last_error} />
+          <OutcomeBanner detail={data} />
         )}
       </div>
+      {job.status === "FAILED" && <RetryPanel job={job} />}
+      <ReviewHistory detail={data} />
+      <PolicyApplied result={result} />
 
-      <EdgeCases detail={data} />
-
-      <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+      {/* Nothing is extracted yet during a run, so the second column would only hold
+          empty states. Collapsing to one keeps the timeline above the fold. */}
+      <div
+        className={cn(
+          "grid gap-8 items-start",
+          running ? "mt-5" : "mt-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]",
+        )}
+      >
         <section aria-labelledby="timeline-heading">
-          <SectionTitle id="timeline-heading" overline="AUDIT" title="Stage timeline" />
-          <div className="mt-6">
-            <StageTimeline events={events} jobStatus={job.status} />
-          </div>
+          <h2
+            id="timeline-heading"
+            className={cn("text-sm font-semibold tracking-tight mb-4", running && "sr-only")}
+          >
+            Processing
+          </h2>
+          <StageTimeline events={events} jobStatus={job.status} live={running} />
+          <RunDetails job={job} result={result} />
         </section>
-        <div className="flex flex-col gap-8">
-          <ExtractedFields result={result} />
-          <MatchedPoBlock result={result} />
-          <PolicyChecks result={result} />
-          <ModelBlock result={result} />
-          <RawText result={result} />
-        </div>
+        {!running && (
+          <div className="flex flex-col gap-8">
+            <InvoiceSummary result={result} />
+            <RelevantEvidence result={result} />
+            <RawText result={result} />
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function SectionTitle({ id, overline, title }: { id?: string; overline: string; title: string }) {
-  return (
-    <div>
-      <div className="mono-label text-muted-foreground">{overline}</div>
-      <h2 id={id} className="mt-1 text-2xl font-semibold tracking-tight">
-        {title}
-      </h2>
-    </div>
-  );
+/** The single business status the page leads with; processing state is implied. */
+function outcomeHeadline(job: JobRow) {
+  if (job.status === "FAILED") return "Processing failed";
+  switch (job.decision_status) {
+    case "APPROVED":
+      return "Approved";
+    case "REJECTED":
+      return "Rejected";
+    case "NEEDS_REVIEW":
+      return "Needs review";
+    default:
+      return "Queued";
+  }
 }
 
-function DecisionBanner({
-  status,
-  decision,
-  result,
-  lastError,
-}: {
-  status: JobStatus;
-  decision: DecisionStatus | null;
-  result: InvoiceResultRow | null;
-  lastError: string | null;
-}) {
+interface Explanation {
+  text: string;
+  action?: string;
+}
+
+/**
+ * One explanation, picked from the rule check that actually drove the decision,
+ * so a balance breach never renders as a generic "no PO match" message. This is
+ * a read of the existing response — no rule is re-evaluated here.
+ */
+function explain(detail: JobDetail): Explanation | null {
+  const { job, result } = detail;
+  if (job.status === "FAILED") {
+    // The technical error is kept out of the lead paragraph; it lives in the retry panel.
+    return {
+      text: "This invoice could not be processed, so no decision was reached.",
+      action: "Retry processing below. Nothing was approved and no purchase-order balance was used.",
+    };
+  }
+  const checks = result?.rule_checks ?? {};
+  const extraction = result?.extraction;
+  const vendor = extraction?.vendor_name;
+  const currency = result?.matched_po?.currency ?? extraction?.currency;
+
+  const duplicate = checks.semantic_duplicate;
+  if (duplicate && duplicate.passed === false) {
+    return {
+      text:
+        duplicate.same_total === true
+          ? `This invoice was already processed for ${vendor ?? "this vendor"} with the same total.`
+          : `A near-identical invoice from ${vendor ?? "this vendor"} was already processed with a different total.`,
+      action: "Confirm this is not a re-submission before paying.",
+    };
+  }
+
+  const po = checks.purchase_order_match;
+  if (po && po.passed === false) {
+    const candidates = Array.isArray(po.candidates) ? (po.candidates as string[]) : [];
+    if (candidates.length > 0) {
+      return {
+        text: `More than one open purchase order matches ${vendor ?? "this vendor"}: ${candidates.join(", ")}.`,
+        action: "Pick the correct purchase order for this invoice.",
+      };
+    }
+    if (po.amount_within_remaining_balance === false) {
+      const over = Number(po.invoice_total ?? 0) - Number(po.remaining_amount ?? 0);
+      return {
+        text: `Invoice total ${formatMoney(String(po.invoice_total ?? ""), currency)} exceeds the remaining balance of ${formatMoney(String(po.remaining_amount ?? ""), currency)} on ${po.po_number ?? "the purchase order"}, by ${formatMoney(String(over), currency)}.`,
+        action: "Verify the PO balance or request an updated purchase order.",
+      };
+    }
+    if (po.po_open === false) {
+      return {
+        text: `Purchase order ${po.po_number ?? ""} is no longer open.`.replace("  ", " "),
+        action: "Reopen the purchase order or raise a new one.",
+      };
+    }
+    if (po.currency_matches === false) {
+      return {
+        text: `The invoice currency does not match purchase order ${po.po_number ?? ""}.`.replace("  ", " "),
+        action: "Confirm the correct currency with the vendor.",
+      };
+    }
+    return {
+      text: `No open purchase order matches ${vendor ?? "this vendor"}${po.po_number ? ` or PO number ${po.po_number}` : ""}.`,
+      action: "Import the missing purchase order or verify the PO number.",
+    };
+  }
+
+  const required = checks.required_invoice_fields;
+  if (required && required.passed === false) {
+    const missing = Array.isArray(required.missing) ? (required.missing as string[]) : [];
+    return {
+      text: missing.length > 0 ? `Missing from the invoice: ${missing.join(", ")}.` : "Required invoice fields are missing.",
+      action: "Check the original PDF for these values.",
+    };
+  }
+
+  if (checks.required_po_number?.passed === false) {
+    return { text: "No PO number was found on the invoice.", action: "Ask the vendor to reference a purchase order." };
+  }
+
+  const confidence = checks.extraction_confidence;
+  if (confidence && confidence.passed === false) {
+    return {
+      text: `Extraction confidence ${formatPercent(Number(confidence.value))} is below the ${formatPercent(Number(confidence.minimum))} required to auto-approve.`,
+      action: "Compare the extracted values against the original PDF.",
+    };
+  }
+
+  if (checks.currency?.passed === false) {
+    return { text: `Currency ${String(checks.currency.value ?? "")} is not accepted by policy.`.replace("  ", " ") };
+  }
+
+  if (checks.invoice_arithmetic?.passed === false) {
+    return { text: "Subtotal and tax do not add up to the invoice total.", action: "Ask the vendor for a corrected invoice." };
+  }
+
+  const reason = result?.reasons?.[0];
+  return reason ? { text: reason } : null;
+}
+
+function OutcomeBanner({ detail }: { detail: JobDetail }) {
   const reduce = useReducedMotion();
-  const reasons = result?.reasons ?? [];
+  const { job } = detail;
+  const decision = job.decision_status;
 
-  const config =
-    status === "FAILED"
-      ? {
-          tone: "destructive" as const,
-          label: "FAILED",
-          icon: <XCircle className="size-5" aria-hidden />,
-          headline: "This run couldn't finish.",
-          fallback: lastError ?? "The pipeline halted before a decision. The timeline shows the failing stage.",
-        }
-      : decision === "APPROVED"
-        ? {
-            tone: "success" as const,
-            label: "APPROVED",
-            icon: <Sparkles className="size-5" aria-hidden />,
-            headline: "Approved. Nothing else needed from you.",
-            fallback: "All required fields, PO checks and policy checks passed.",
-          }
+  const tone =
+    job.status === "FAILED" || decision === "REJECTED"
+      ? "destructive"
+      : decision === "NEEDS_REVIEW"
+        ? "warning"
+        : decision === "APPROVED"
+          ? "success"
+          : null;
+  if (!tone) return null;
+
+  const { eyebrow, headline } =
+    job.status === "FAILED"
+      ? { eyebrow: "FAILED", headline: "Run failed." }
+      : decision === "REJECTED"
+        ? { eyebrow: "REJECTED", headline: "Rejected on policy." }
         : decision === "NEEDS_REVIEW"
-          ? {
-              tone: "warning" as const,
-              label: "NEEDS YOUR INPUT",
-              icon: <AlertTriangle className="size-5" aria-hidden />,
-              headline: "A human call is required here.",
-              fallback: "The policy engine could not decide with the required confidence.",
-            }
-          : decision === "REJECTED"
-            ? {
-                tone: "destructive" as const,
-                label: "REJECTED",
-                icon: <XCircle className="size-5" aria-hidden />,
-                headline: "Rejected on policy.",
-                fallback: "A hard policy rule rejected this invoice.",
-              }
-            : null;
+          ? { eyebrow: "NEEDS YOUR INPUT", headline: "Needs a human call." }
+          : { eyebrow: "APPROVED", headline: "Approved." };
 
-  if (!config) return null;
-
-  const toneClass = {
-    success: "bg-success/12 border-success/25",
-    warning: "bg-acid border-foreground/10",
-    destructive: "bg-destructive/10 border-destructive/25",
-  }[config.tone];
+  const explanation = explain(detail);
+  if (tone === "success" && !explanation) return null;
 
   return (
     <motion.div
       initial={reduce ? false : { opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className={cn("rounded-2xl border p-6 md:p-8", toneClass)}
+      className={cn(
+        "rounded-2xl border p-6 md:p-8",
+        tone === "success" && "bg-success/12 border-success/25",
+        tone === "warning" && "bg-acid border-foreground/10",
+        tone === "destructive" && "bg-destructive/10 border-destructive/25",
+      )}
     >
       <div className="flex items-center gap-2 mono-label">
         <span
           className={cn(
             "inline-flex size-6 items-center justify-center rounded-full",
-            config.tone === "success" && "bg-success text-white",
-            config.tone === "warning" && "bg-foreground text-background",
-            config.tone === "destructive" && "bg-destructive text-white",
+            tone === "success" && "bg-success text-white",
+            tone === "warning" && "bg-foreground text-background",
+            tone === "destructive" && "bg-destructive text-white",
           )}
         >
-          {config.icon}
+          {tone === "success" ? (
+            <CheckCircle2 className="size-4" aria-hidden />
+          ) : tone === "warning" ? (
+            <AlertTriangle className="size-4" aria-hidden />
+          ) : (
+            <XCircle className="size-4" aria-hidden />
+          )}
         </span>
-        {config.label}
+        {eyebrow}
       </div>
-      <h2 className="mt-4 text-3xl md:text-5xl font-semibold tracking-tight leading-tight">{config.headline}</h2>
-      {reasons.length > 0 ? (
-        <ul className="mt-4 flex flex-col gap-1.5 max-w-2xl text-foreground/80">
-          {reasons.map((reason) => (
-            <li key={reason} className="flex gap-2">
-              <span aria-hidden>·</span>
-              <span>{reason}</span>
-            </li>
-          ))}
-        </ul>
-      ) : (
-        <p className="mt-4 text-foreground/70 max-w-2xl">{config.fallback}</p>
+      <h2 className="mt-4 text-3xl md:text-5xl font-semibold tracking-tight leading-tight">{headline}</h2>
+      {explanation && <p className="mt-4 text-foreground/80 max-w-2xl">{explanation.text}</p>}
+      {explanation?.action && (
+        <p className="mt-3 max-w-2xl">
+          <span className="font-medium">Recommended action:</span> {explanation.action}
+        </p>
       )}
     </motion.div>
   );
 }
 
-function checkOf(result: InvoiceResultRow | null, key: string): RuleCheck | undefined {
-  return result?.rule_checks?.[key];
-}
-
-function eventOf(events: InvoiceEvent[], stage: string) {
-  return events.find((event) => event.stage === stage);
-}
-
 /**
- * Each block is derived from what the worker actually recorded — rule_checks
- * context and event payloads — never from a guess about which case applies.
+ * Only a failed run can be re-queued; the backend refuses anything else with 409. Retrying
+ * never re-consumes purchase-order balance — an already-allocated document keeps its allocation.
  */
-function EdgeCases({ detail }: { detail: JobDetail }) {
-  const { events, result } = detail;
-  const blocks: React.ReactNode[] = [];
+function RetryPanel({ job }: { job: JobRow }) {
+  const [note, setNote] = useState("");
+  const retry = useRetryJob(job.job_id);
 
-  const ocrEvent = eventOf(events, "stage_ocr_fallback");
-  const textEvent = eventOf(events, "stage_text_extract");
-  const usedOcr = Boolean(ocrEvent) || textEvent?.data?.used_ocr_fallback === true;
-  if (usedOcr) {
-    const ocrConfidence = ocrEvent?.metrics?.ocr_confidence;
-    const extractionConfidence = result?.extraction.extraction_confidence;
-    blocks.push(
-      <div key="ocr" className="rounded-2xl border border-electric/25 bg-electric/8 p-5 md:p-6">
-        <div className="flex items-center gap-2 mono-label text-electric">
-          <Info className="size-4" aria-hidden /> OCR FALLBACK
-        </div>
-        <p className="mt-3 text-foreground/80 max-w-3xl">
-          {ocrEvent?.reason ?? textEvent?.reason ?? "Native PDF text was weak, so pages were rendered for OCR/VLM."}
-        </p>
-        <div className="mt-4 flex flex-wrap gap-6">
-          {typeof ocrConfidence === "number" && (
-            <Stat label="OCR CONFIDENCE" value={formatPercent(ocrConfidence)} />
-          )}
-          {extractionConfidence != null && (
-            <Stat
-              label="EXTRACTION CONFIDENCE"
-              value={formatPercent(extractionConfidence)}
-              tone={extractionConfidence < 0.85 ? "destructive" : undefined}
-            />
-          )}
-        </div>
-      </div>,
-    );
-  }
-
-  const duplicate = checkOf(result, "semantic_duplicate");
-  if (duplicate && duplicate.passed === false) {
-    const firstDocumentId = duplicate.first_document_id;
-    blocks.push(
-      <div key="duplicate" className="rounded-2xl border border-destructive/25 bg-destructive/8 p-5 md:p-6">
-        <div className="flex items-center gap-2 mono-label text-destructive">
-          <XCircle className="size-4" aria-hidden /> SEMANTIC DUPLICATE
-        </div>
-        <p className="mt-3 text-foreground/80 max-w-3xl">
-          This vendor and invoice number were already processed
-          {duplicate.same_total === true
-            ? " with the same total, which is a hard rejection."
-            : " with a different total, so a reviewer must confirm."}
-        </p>
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Stat label="VENDOR" value={result?.extraction.vendor_name ?? "—"} />
-          <Stat label="INVOICE NO." value={result?.extraction.invoice_number ?? "—"} />
-          <Stat
-            label="THIS TOTAL"
-            value={formatMoney(result?.extraction.total, result?.extraction.currency)}
+  return (
+    <section aria-labelledby="retry-heading" className="mt-6 rounded-2xl border border-divider p-5">
+      <h2 id="retry-heading" className="text-sm font-semibold tracking-tight">
+        Try this invoice again
+      </h2>
+      <p className="mt-1.5 text-sm text-muted-foreground">
+        Processing stopped before a decision. Re-queueing keeps the full history of this run.
+        {job.manual_retry_count > 0 && ` Retried ${job.manual_retry_count} time(s) already.`}
+      </p>
+      <div className="mt-4 flex flex-wrap items-end gap-3">
+        <label className="text-sm min-w-[240px] flex-1">
+          <span className="mono-label text-muted-foreground">NOTE (OPTIONAL)</span>
+          <Input
+            className="mt-1.5"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Vendor sent a clearer scan."
           />
-          {typeof firstDocumentId === "string" && (
-            <div>
-              <div className="mono-label text-muted-foreground">FIRST DOCUMENT</div>
-              <a
-                href={api.documentFileUrl(firstDocumentId)}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-1 inline-flex items-center gap-1 font-mono text-sm underline underline-offset-4 break-all"
-              >
-                {firstDocumentId.slice(0, 12)}…
-                <ExternalLink className="size-3" aria-hidden />
-              </a>
-            </div>
+        </label>
+        <Button
+          className="rounded-full"
+          disabled={retry.isPending}
+          onClick={() =>
+            retry.mutate(
+              { requested_by: "Operator", note: note.trim() || null },
+              {
+                onSuccess: (data) => toast.success(data.message),
+                onError: (error) => toast.error(error instanceof Error ? error.message : "Retry failed."),
+              },
+            )
+          }
+        >
+          {retry.isPending ? (
+            <Loader2 className="size-4 mr-1 animate-spin" aria-hidden />
+          ) : (
+            <RotateCw className="size-4 mr-1" aria-hidden />
           )}
-        </div>
-      </div>,
-    );
-  }
-
-  const poCheck = checkOf(result, "purchase_order_match");
-  const candidates = Array.isArray(poCheck?.candidates) ? (poCheck.candidates as string[]) : [];
-  const poEvent = eventOf(events, "stage_po_match");
-  if (!result?.matched_po && candidates.length > 0) {
-    blocks.push(
-      <div key="ambiguous" className="rounded-2xl border border-foreground/10 bg-acid p-5 md:p-6">
-        <div className="flex items-center gap-2 mono-label">
-          <AlertTriangle className="size-4" aria-hidden /> AMBIGUOUS PURCHASE ORDER
-        </div>
-        <p className="mt-3 text-foreground/80 max-w-3xl">
-          {poEvent?.reason ?? "More than one open purchase order matches this vendor; a reviewer must choose one."}
-        </p>
-        <div className="mt-4 flex flex-wrap gap-2">
-          {candidates.map((candidate) => (
-            <span
-              key={candidate}
-              className="mono-label bg-background border border-foreground/20 rounded-full px-3 py-1"
-            >
-              {candidate}
-            </span>
-          ))}
-        </div>
-      </div>,
-    );
-  }
-
-  if (poCheck && poCheck.amount_within_remaining_balance === false) {
-    const remaining = Number(poCheck.remaining_amount ?? 0);
-    const invoiceTotal = Number(poCheck.invoice_total ?? 0);
-    const currency = result?.matched_po?.currency ?? result?.extraction.currency;
-    blocks.push(
-      <div key="balance" className="rounded-2xl border border-destructive/25 bg-destructive/8 p-5 md:p-6">
-        <div className="flex items-center gap-2 mono-label text-destructive">
-          <XCircle className="size-4" aria-hidden /> PO BALANCE EXCEEDED
-        </div>
-        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4">
-          <Stat label="INVOICE TOTAL" value={formatMoney(String(poCheck.invoice_total ?? ""), currency)} />
-          <Stat label="PO TOTAL" value={formatMoney(result?.matched_po?.total_amount, currency)} />
-          <Stat label="CONSUMED" value={formatMoney(result?.matched_po?.consumed_amount, currency)} />
-          <Stat label="REMAINING" value={formatMoney(String(poCheck.remaining_amount ?? ""), currency)} tone="destructive" />
-        </div>
-        <p className="mt-4 text-foreground/80">
-          Over by <span className="font-semibold tabular-nums">{formatMoney(String(invoiceTotal - remaining), currency)}</span>.
-        </p>
-      </div>,
-    );
-  }
-
-  if (blocks.length === 0) return null;
-  return <div className="mt-6 flex flex-col gap-4">{blocks}</div>;
-}
-
-function Stat({ label, value, tone }: { label: string; value: string; tone?: "destructive" }) {
-  return (
-    <div>
-      <div className="mono-label text-muted-foreground">{label}</div>
-      <div className={cn("mt-1 text-2xl font-semibold tabular-nums", tone === "destructive" && "text-destructive")}>
-        {value}
+          Retry processing
+        </Button>
       </div>
-    </div>
+      {job.last_error && (
+        <Disclosure label="Technical error" className="mt-4">
+          <p className="mt-2 rounded-xl bg-panel p-3 font-mono text-xs break-words">{job.last_error}</p>
+        </Disclosure>
+      )}
+    </section>
   );
 }
 
-function ConfidenceMeter({ value }: { value: number }) {
-  const tone = value >= 0.85 ? "bg-success" : value >= 0.6 ? "bg-electric" : "bg-warning";
+/** What the decision was measured against, in words first and JSON only on request. */
+function PolicyApplied({ result }: { result: InvoiceResultRow | null }) {
+  const snapshot = result?.policy_snapshot;
+  if (!snapshot) return null;
+
+  const rows: [string, string][] = [
+    ["Policy version", snapshot.policy_version],
+    ["Amount tolerance", snapshot.amount_tolerance],
+    ["Auto-approve confidence", formatPercent(snapshot.minimum_auto_approve_confidence)],
+    ["PO number required", snapshot.require_po_number ? "Yes" : "No"],
+    ["Allowed currencies", snapshot.allowed_currencies.join(", ")],
+  ];
+
   return (
-    <span className="inline-flex items-center gap-2">
-      <span aria-hidden className="h-1.5 w-16 rounded-full bg-panel overflow-hidden">
-        <span className={cn("block h-full rounded-full", tone)} style={{ width: `${Math.round(value * 100)}%` }} />
-      </span>
-      <span className="mono-label tabular-nums">{formatPercent(value)}</span>
-    </span>
+    <section className="mt-6 rounded-2xl border border-divider p-5">
+      <h2 className="text-sm font-semibold tracking-tight">Policy applied</h2>
+      <dl className="mt-3 grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="text-xs text-muted-foreground">{label}</dt>
+            <dd className="mt-0.5 text-sm font-medium break-words">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      <Disclosure label="Policy snapshot (technical)" className="mt-4">
+        <p className="mt-2 mono-label text-muted-foreground break-all">HASH {result?.policy_hash ?? "—"}</p>
+        <pre className="mt-2 max-h-72 overflow-auto rounded-xl bg-panel p-3 text-xs font-mono whitespace-pre-wrap">
+          {JSON.stringify(snapshot, null, 2)}
+        </pre>
+      </Disclosure>
+    </section>
   );
 }
 
-function ExtractedFields({ result }: { result: InvoiceResultRow | null }) {
+function Disclosure({
+  label,
+  children,
+  className,
+}: {
+  label: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className={className}>
+      <CollapsibleTrigger asChild>
+        <button className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+          {label}
+          <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} aria-hidden />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>{children}</CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+/** Everything an operator needs when debugging a run, and nothing a reviewer does. */
+function RunDetails({ job, result }: { job: JobRow; result: InvoiceResultRow | null }) {
+  const rows: [string, string][] = [
+    ["Job", job.job_id],
+    ["Document", job.document_id],
+    ["Attempts", `${job.attempts} of ${job.max_attempts}`],
+    ["Pages", job.page_count != null ? String(job.page_count) : "—"],
+    ["Policy version", job.policy_version],
+    ["Created", formatDateTime(job.created_at)],
+    ["Updated", formatDateTime(job.updated_at)],
+  ];
+  if (result?.model_name) {
+    rows.push(["Model", result.model_name], ["Model latency", formatMs(result.model_latency_ms) || "—"]);
+  }
+
+  return (
+    <Disclosure label="Run details" className="mt-4">
+      <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 rounded-xl bg-panel p-4 text-xs">
+        {rows.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="mono-label text-muted-foreground">{label}</dt>
+            <dd className="mt-0.5 font-mono break-all">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {result && Object.keys(result.rule_checks ?? {}).length > 0 && (
+        <div className="mt-3">
+          <RuleChecks checks={result.rule_checks} />
+        </div>
+      )}
+    </Disclosure>
+  );
+}
+
+function InvoiceSummary({ result }: { result: InvoiceResultRow | null }) {
   if (!result) {
     return (
       <section>
-        <SectionTitle overline="EXTRACTED" title="Fields & evidence" />
-        <p className="mt-4 text-foreground/60 text-sm">No extraction has been written for this run yet.</p>
+        <h2 className="text-sm font-semibold tracking-tight">Invoice</h2>
+        <p className="mt-3 text-sm text-foreground/60">No extraction yet.</p>
       </section>
     );
   }
 
   const extraction = result.extraction;
+  const po = result.matched_po;
   const fields: [string, string][] = [
     ["Vendor", extraction.vendor_name ?? "—"],
     ["Invoice no.", extraction.invoice_number ?? "—"],
@@ -410,142 +481,113 @@ function ExtractedFields({ result }: { result: InvoiceResultRow | null }) {
 
   return (
     <section>
-      <SectionTitle overline="EXTRACTED" title="Fields & evidence" />
+      <h2 className="text-sm font-semibold tracking-tight">Invoice</h2>
 
-      <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-4 border-y border-divider py-4">
+      <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y border-divider py-4">
         {fields.map(([label, value]) => (
           <div key={label} className="min-w-0">
-            <dt className="mono-label text-muted-foreground">{label}</dt>
-            <dd className="mt-1 font-medium break-words tabular-nums">{value}</dd>
+            <dt className="text-xs text-muted-foreground">{label}</dt>
+            <dd className="mt-0.5 text-sm font-medium break-words tabular-nums">{value}</dd>
           </div>
         ))}
-        <div className="min-w-0">
-          <dt className="mono-label text-muted-foreground">Confidence</dt>
-          <dd className="mt-1">
-            <ConfidenceMeter value={extraction.extraction_confidence} />
-          </dd>
-        </div>
       </dl>
 
+      {po && (
+        <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3">
+          <div className="col-span-2">
+            <dt className="text-xs text-muted-foreground">Matched purchase order</dt>
+            <dd className="mt-0.5 text-sm font-medium">
+              {po.po_number} · {po.vendor_name}
+            </dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">PO total</dt>
+            <dd className="mt-0.5 text-sm tabular-nums">{formatMoney(po.total_amount, po.currency)}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-muted-foreground">Remaining</dt>
+            <dd className="mt-0.5 text-sm tabular-nums">
+              {formatMoney(String(Number(po.total_amount) - Number(po.consumed_amount)), po.currency)}
+            </dd>
+          </div>
+        </dl>
+      )}
+
       {extraction.line_items.length > 0 && (
-        <div className="mt-6 overflow-x-auto">
-          <table className="w-full text-sm">
-            <caption className="sr-only">Invoice line items</caption>
-            <thead>
-              <tr className="mono-label text-muted-foreground text-left border-b border-divider">
-                <th scope="col" className="py-2 pr-3 font-normal">Description</th>
-                <th scope="col" className="py-2 px-3 font-normal text-right">Qty</th>
-                <th scope="col" className="py-2 px-3 font-normal text-right">Unit</th>
-                <th scope="col" className="py-2 pl-3 font-normal text-right">Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-divider">
-              {extraction.line_items.map((item, index) => (
-                <tr key={`${item.description ?? "line"}-${index}`}>
-                  <td className="py-2 pr-3">{item.description ?? "—"}</td>
-                  <td className="py-2 px-3 text-right tabular-nums">{item.quantity ?? "—"}</td>
-                  <td className="py-2 px-3 text-right tabular-nums">
-                    {formatMoney(item.unit_price, extraction.currency)}
-                  </td>
-                  <td className="py-2 pl-3 text-right tabular-nums">
-                    {formatMoney(item.amount, extraction.currency)}
-                  </td>
+        <Disclosure label="Invoice line items" className="mt-4">
+          <div className="mt-3 overflow-x-auto">
+            <table className="w-full text-sm">
+              <caption className="sr-only">Invoice line items</caption>
+              <thead>
+                <tr className="text-xs text-muted-foreground text-left border-b border-divider">
+                  <th scope="col" className="py-2 pr-3 font-normal">Description</th>
+                  <th scope="col" className="py-2 px-3 font-normal text-right">Qty</th>
+                  <th scope="col" className="py-2 px-3 font-normal text-right">Unit</th>
+                  <th scope="col" className="py-2 pl-3 font-normal text-right">Amount</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {extraction.evidence.length > 0 && (
-        <div className="mt-6">
-          <div className="mono-label text-muted-foreground">EVIDENCE</div>
-          <ul className="mt-3 flex flex-col gap-3">
-            {extraction.evidence.map((item, index) => (
-              <li
-                key={`${item.field}-${index}`}
-                className="border-l-2 border-electric bg-panel/70 rounded-r-md px-4 py-3"
-              >
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="mono-label">{item.field}</span>
-                  {item.page != null && <span className="mono-label text-muted-foreground">P{item.page}</span>}
-                  {item.confidence != null && <ConfidenceMeter value={item.confidence} />}
-                </div>
-                {item.quote && <p className="mt-2 font-mono text-xs text-foreground/80 break-words">{item.quote}</p>}
-              </li>
-            ))}
-          </ul>
-        </div>
+              </thead>
+              <tbody className="divide-y divide-divider">
+                {extraction.line_items.map((item, index) => (
+                  <tr key={`${item.description ?? "line"}-${index}`}>
+                    <td className="py-2 pr-3">{item.description ?? "—"}</td>
+                    <td className="py-2 px-3 text-right tabular-nums">{item.quantity ?? "—"}</td>
+                    <td className="py-2 px-3 text-right tabular-nums">
+                      {formatMoney(item.unit_price, extraction.currency)}
+                    </td>
+                    <td className="py-2 pl-3 text-right tabular-nums">
+                      {formatMoney(item.amount, extraction.currency)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Disclosure>
       )}
     </section>
   );
 }
 
-function MatchedPoBlock({ result }: { result: InvoiceResultRow | null }) {
-  const po = result?.matched_po;
-  if (!po) return null;
+/** Fields the decision turned on, quoted from the page they were read off. */
+const PRIORITY_EVIDENCE = ["vendor_name", "po_number"];
 
-  const remaining = Number(po.total_amount) - Number(po.consumed_amount);
-  const invoiceTotal = result?.extraction.total;
-  const covered = invoiceTotal != null && Number(invoiceTotal) <= remaining;
+function RelevantEvidence({ result }: { result: InvoiceResultRow | null }) {
+  const evidence = result?.extraction.evidence ?? [];
+  if (evidence.length === 0) return null;
+
+  const primary = evidence.filter((item) => PRIORITY_EVIDENCE.includes(item.field));
+  const rest = evidence.filter((item) => !PRIORITY_EVIDENCE.includes(item.field));
+  const shown = primary.length > 0 ? primary : evidence.slice(0, 2);
+  const hidden = primary.length > 0 ? rest : evidence.slice(2);
 
   return (
     <section>
-      <SectionTitle overline="PO MATCH" title="Matched purchase order" />
-      <div className="mt-5 rounded-2xl bg-ink text-electric-foreground p-6">
-        <div className="mono-label opacity-70">PO NUMBER</div>
-        <div className="mt-1 text-3xl font-semibold tracking-tight">{po.po_number}</div>
-        <div className="mono-label opacity-70 mt-2">
-          {po.vendor_name} · {po.status}
-        </div>
-        <div className="mt-6 grid grid-cols-3 gap-4">
-          <div>
-            <div className="mono-label opacity-70">PO TOTAL</div>
-            <div className="mt-1 text-lg tabular-nums">{formatMoney(po.total_amount, po.currency)}</div>
-          </div>
-          <div>
-            <div className="mono-label opacity-70">CONSUMED</div>
-            <div className="mt-1 text-lg tabular-nums">{formatMoney(po.consumed_amount, po.currency)}</div>
-          </div>
-          <div>
-            <div className="mono-label opacity-70">REMAINING</div>
-            <div className="mt-1 text-lg tabular-nums">{formatMoney(String(remaining), po.currency)}</div>
-          </div>
-        </div>
-        <p className="mt-6 mono-label">
-          {invoiceTotal == null
-            ? "NO INVOICE TOTAL EXTRACTED"
-            : covered
-              ? "WITHIN REMAINING BALANCE"
-              : "EXCEEDS REMAINING BALANCE"}
-        </p>
-      </div>
+      <h2 className="text-sm font-semibold tracking-tight">Evidence</h2>
+      <EvidenceList items={shown} />
+      {hidden.length > 0 && (
+        <Disclosure label="All extracted evidence" className="mt-3">
+          <EvidenceList items={hidden} />
+        </Disclosure>
+      )}
     </section>
   );
 }
 
-function PolicyChecks({ result }: { result: InvoiceResultRow | null }) {
-  if (!result || Object.keys(result.rule_checks ?? {}).length === 0) return null;
+function EvidenceList({ items }: { items: InvoiceResultRow["extraction"]["evidence"] }) {
   return (
-    <section>
-      <SectionTitle overline="POLICY" title="Rule checks" />
-      <div className="mt-5">
-        <RuleChecks checks={result.rule_checks} />
-      </div>
-    </section>
-  );
-}
-
-function ModelBlock({ result }: { result: InvoiceResultRow | null }) {
-  if (!result?.model_name) return null;
-  return (
-    <section className="rounded-xl bg-panel p-5">
-      <div className="mono-label text-muted-foreground">MODEL</div>
-      <div className="mt-1 flex items-baseline justify-between gap-4">
-        <div className="font-mono">{result.model_name}</div>
-        <div className="mono-label text-muted-foreground tabular-nums">{formatMs(result.model_latency_ms)}</div>
-      </div>
-    </section>
+    <ul className="mt-3 flex flex-col gap-2">
+      {items.map((item, index) => (
+        <li key={`${item.field}-${index}`} className="border-l-2 border-electric bg-panel/70 rounded-r-md px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>{item.field.replaceAll("_", " ")}</span>
+            {item.page != null && <span>page {item.page}</span>}
+            {/* Confidence is only worth the pixels when it is not a certainty. */}
+            {item.confidence != null && item.confidence < 1 && <span>{formatPercent(item.confidence)} confident</span>}
+          </div>
+          {item.quote && <p className="mt-1 font-mono text-xs text-foreground/80 break-words">{item.quote}</p>}
+        </li>
+      ))}
+    </ul>
   );
 }
 
@@ -558,12 +600,9 @@ function RawText({ result }: { result: InvoiceResultRow | null }) {
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <CollapsibleTrigger asChild>
-        <button className="w-full flex items-center justify-between py-3 px-4 rounded-xl bg-panel hover:bg-panel/80 text-left">
-          <div>
-            <div className="mono-label text-muted-foreground">RAW EXTRACTED TEXT</div>
-            <div className="mt-1 text-sm text-foreground/70">What the extractor read from the PDF</div>
-          </div>
-          <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} aria-hidden />
+        <button className="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground">
+          Raw extracted text
+          <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} aria-hidden />
         </button>
       </CollapsibleTrigger>
       <CollapsibleContent>

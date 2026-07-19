@@ -1,6 +1,6 @@
 import { motion, useReducedMotion } from "motion/react";
 
-export function ProcessingPanel({ label = "Worker is running", detail }: { label?: string; detail?: string }) {
+export function ProcessingPanel({ label = "Worker is running" }: { label?: string }) {
   const reduce = useReducedMotion();
   return (
     <div className="relative overflow-hidden rounded-2xl bg-electric text-electric-foreground p-8 md:p-10 border border-electric/40">
@@ -20,9 +20,8 @@ export function ProcessingPanel({ label = "Worker is running", detail }: { label
           <span className="mono-label">{label}</span>
         </div>
         <h2 className="text-4xl md:text-6xl font-semibold tracking-tight leading-[0.95] max-w-3xl">
-          Processing your invoices end-to-end.
+          Processing.
         </h2>
-        {detail && <p className="max-w-2xl text-white/85">{detail}</p>}
       </div>
     </div>
   );

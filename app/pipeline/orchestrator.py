@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from app.core.config import get_settings
-from app.core.schemas import DecisionStatus, InvoiceDecision, InvoiceExtraction, StageStatus
+from app.core.schemas import DecisionStatus, StageStatus
 from app.db import repository
 from app.pipeline.decision import evaluate_decision, match_purchase_order
 from app.pipeline.normalizer import heuristic_extract
@@ -98,6 +98,7 @@ def process_job(job: dict[str, Any]) -> None:
         if extraction.vendor_name and extraction.invoice_number:
             duplicate = repository.claim_semantic_invoice(
                 document_id=document_id,
+                job_id=job_id,
                 vendor_name=extraction.vendor_name,
                 invoice_number=extraction.invoice_number,
                 total=extraction.total,
@@ -124,28 +125,10 @@ def process_job(job: dict[str, Any]) -> None:
         )
 
         decision = evaluate_decision(extraction, match, duplicate)
-        if decision.status == DecisionStatus.APPROVED and decision.matched_po and extraction.total is not None:
-            reserved = repository.reserve_po_amount(decision.matched_po.po_number, extraction.total)
-            if not reserved:
-                decision = InvoiceDecision(
-                    status=DecisionStatus.NEEDS_REVIEW,
-                    reasons=["Purchase-order balance changed while processing; reviewer must recheck the invoice."],
-                    matched_po=decision.matched_po,
-                    match_confidence=decision.match_confidence,
-                    rule_checks={**decision.rule_checks, "atomic_po_reservation": {"passed": False}},
-                )
-            else:
-                decision.rule_checks["atomic_po_reservation"] = {"passed": True}
 
-        repository.log_event(
-            job_id,
-            "stage_policy_validate",
-            StageStatus.PASS if decision.status == DecisionStatus.APPROVED else StageStatus.INFO,
-            reason="; ".join(decision.reasons),
-            data={"decision": decision.model_dump(mode="json")},
-        )
-
-        repository.complete_job(
+        # Balance consumption, the result row, job closure and the closing audit events are one
+        # transaction; finalize downgrades to NEEDS_REVIEW if the PO balance moved under us.
+        repository.finalize_invoice_decision(
             job_id=job_id,
             document_id=document_id,
             decision_status=decision.status,
@@ -155,13 +138,10 @@ def process_job(job: dict[str, Any]) -> None:
             rule_checks=decision.rule_checks,
             model_name=model_name,
             model_latency_ms=model_latency_ms,
-        )
-        repository.log_event(
-            job_id,
-            "invoice_closed",
-            StageStatus.PASS,
-            reason=f"Invoice processing completed as {decision.status}.",
-            ms=_ms(started),
+            allocation_amount=extraction.total if decision.status == DecisionStatus.APPROVED else None,
+            total_ms=_ms(started),
+            policy_snapshot=decision.policy_snapshot,
+            policy_hash=decision.policy_hash,
         )
     except Exception as exc:
         repository.log_event(job_id, "invoice_closed", StageStatus.FAIL, reason=str(exc), ms=_ms(started))

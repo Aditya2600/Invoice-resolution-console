@@ -6,7 +6,9 @@ from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
+from app.core.schemas import RetryRequest, ReviewResolveRequest
 from app.db import repository
+from app.pipeline import review
 from app.services.pdf import inspect_pdf
 from app.services.storage import file_path, save_uploaded_pdf
 
@@ -85,6 +87,54 @@ def job_detail(job_id: str) -> dict:
     if not detail:
         raise HTTPException(status_code=404, detail="Job not found.")
     return detail
+
+
+@router.get("/jobs/{job_id}/review/candidates")
+def review_candidates(job_id: str) -> dict:
+    """Open purchase orders a reviewer may pick for this invoice, with live remaining balance."""
+    detail = repository.get_job_detail(job_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    extraction = (detail["result"] or {}).get("extraction") or {}
+    candidates = repository.find_purchase_orders(po_number=None, vendor_name=extraction.get("vendor_name"))
+    return {"candidates": [po.model_dump(mode="json") for po in candidates]}
+
+
+@router.post("/jobs/{job_id}/review/resolve")
+def resolve_review(job_id: str, body: ReviewResolveRequest) -> dict:
+    try:
+        outcome = review.resolve_review(
+            job_id=job_id,
+            action=body.action,
+            reviewer_name=body.reviewer_name.strip(),
+            note=body.note.strip(),
+            selected_po_number=body.selected_po_number.strip().upper() if body.selected_po_number else None,
+            corrections=body.corrections.model_dump(mode="json", exclude_none=True) if body.corrections else {},
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repository.ReviewConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except review.ReviewError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"message": f"Invoice resolved as {outcome['decision_status']}.", **outcome}
+
+
+@router.post("/jobs/{job_id}/retry")
+def retry_job(job_id: str, body: RetryRequest | None = None) -> dict:
+    """Re-queue a failed run. Completed runs are terminal and are refused with 409."""
+    request = body or RetryRequest()
+    try:
+        outcome = repository.retry_job(
+            job_id,
+            requested_by=(request.requested_by or "Operator").strip() or "Operator",
+            note=request.note.strip() if request.note else None,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except repository.RetryConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"message": "Invoice re-queued for processing.", **outcome}
 
 
 @router.get("/documents/{document_id}/file")

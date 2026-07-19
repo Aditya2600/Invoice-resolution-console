@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "@/lib/api";
 import { isRunning } from "@/lib/format";
-import type { JobDetail, JobListItem } from "@/lib/types";
+import type { JobDetail, JobListItem, PurchaseOrder, ResolveReviewRequest, RetryJobRequest } from "@/lib/types";
 
 const POLL_MS = 2500;
 
@@ -27,6 +27,32 @@ export function useJob(jobId?: string) {
     queryFn: () => api.getJob(jobId as string),
     enabled: Boolean(jobId),
     refetchInterval: (query) => (query.state.data && isRunning(query.state.data.job.status) ? POLL_MS : false),
+  });
+}
+
+/** Open POs a reviewer may pick, with live balances. Only fetched while the job awaits review. */
+export function useReviewCandidates(jobId: string | undefined, enabled: boolean) {
+  return useQuery<PurchaseOrder[]>({
+    queryKey: [...jobKeys.detail(jobId ?? ""), "candidates"],
+    queryFn: () => api.reviewCandidates(jobId as string),
+    enabled: Boolean(jobId) && enabled,
+  });
+}
+
+export function useResolveReview(jobId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ResolveReviewRequest) => api.resolveReview(jobId, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: jobKeys.all }),
+  });
+}
+
+/** Re-queues a failed run; invalidating jobKeys.all refreshes both this run and the dashboard. */
+export function useRetryJob(jobId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RetryJobRequest) => api.retryJob(jobId, body),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: jobKeys.all }),
   });
 }
 

@@ -21,6 +21,11 @@ class DecisionStatus(StrEnum):
     REJECTED = "REJECTED"
 
 
+class ReviewAction(StrEnum):
+    APPROVE = "APPROVE"
+    REJECT = "REJECT"
+
+
 class StageStatus(StrEnum):
     PASS = "PASS"
     FAIL = "FAIL"
@@ -87,6 +92,8 @@ class InvoiceDecision(BaseModel):
     matched_po: PurchaseOrder | None = None
     match_confidence: float = Field(default=0.0, ge=0, le=1)
     rule_checks: dict[str, Any] = Field(default_factory=dict)
+    policy_snapshot: dict[str, Any] = Field(default_factory=dict)
+    policy_hash: str | None = None
 
 
 class InvoiceResult(BaseModel):
@@ -97,6 +104,32 @@ class InvoiceResult(BaseModel):
     model_name: str | None = None
     model_latency_ms: float | None = None
     created_at: datetime | None = None
+
+
+class ExtractionCorrections(BaseModel):
+    """Reviewer overrides. Stored on the review action only; the model extraction is preserved."""
+
+    vendor_name: str | None = None
+    invoice_number: str | None = None
+    invoice_date: date | None = None
+    po_number: str | None = None
+    currency: str | None = None
+    subtotal: Decimal | None = None
+    tax: Decimal | None = None
+    total: Decimal | None = None
+
+
+class ReviewResolveRequest(BaseModel):
+    action: ReviewAction
+    reviewer_name: str = Field(min_length=1, max_length=120)
+    note: str = Field(min_length=1, max_length=2000)
+    selected_po_number: str | None = None
+    corrections: ExtractionCorrections | None = None
+
+
+class RetryRequest(BaseModel):
+    requested_by: str = Field(default="Operator", max_length=120)
+    note: str | None = Field(default=None, max_length=2000)
 
 
 class JobListItem(BaseModel):

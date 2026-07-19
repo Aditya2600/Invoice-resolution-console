@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from decimal import Decimal
@@ -38,6 +39,29 @@ def get_vendor_rule(vendor_name: str | None) -> VendorRule:
     )
 
 
+def build_policy_snapshot(vendor_name: str | None) -> dict:
+    """The exact rule values a decision was made under, frozen onto the result row.
+
+    vendor_rules.json can change at any time; a stored snapshot keeps every historical
+    decision explainable without reading the current config.
+    """
+    rule = get_vendor_rule(vendor_name)
+    return {
+        "policy_version": get_settings().policy_version,
+        "vendor_normalized": normalize_name(vendor_name),
+        "amount_tolerance": str(rule.amount_tolerance),
+        "minimum_auto_approve_confidence": rule.minimum_auto_approve_confidence,
+        "require_po_number": rule.require_po_number,
+        "allowed_currencies": list(rule.allowed_currencies),
+    }
+
+
+def policy_hash(snapshot: dict) -> str:
+    """Stable SHA-256 over canonical sorted JSON: same rule values always hash the same."""
+    canonical = json.dumps(snapshot, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def match_purchase_order(extraction: InvoiceExtraction) -> MatchResult:
     candidates = find_purchase_orders(po_number=extraction.po_number, vendor_name=extraction.vendor_name)
     if not candidates:
@@ -68,6 +92,17 @@ def match_purchase_order(extraction: InvoiceExtraction) -> MatchResult:
 
 
 def evaluate_decision(
+    extraction: InvoiceExtraction,
+    match: MatchResult,
+    semantic_duplicate: dict | None,
+) -> InvoiceDecision:
+    """Deterministic policy verdict, stamped with the rule values it was made under."""
+    snapshot = build_policy_snapshot(extraction.vendor_name)
+    decision = _evaluate(extraction, match, semantic_duplicate)
+    return decision.model_copy(update={"policy_snapshot": snapshot, "policy_hash": policy_hash(snapshot)})
+
+
+def _evaluate(
     extraction: InvoiceExtraction,
     match: MatchResult,
     semantic_duplicate: dict | None,
@@ -119,12 +154,20 @@ def evaluate_decision(
     if semantic_duplicate:
         first_total = semantic_duplicate.get("first_total")
         same_total = first_total is not None and extraction.total is not None and Decimal(str(first_total)) == extraction.total
+        state = semantic_duplicate.get("state", "FINAL")
         checks["semantic_duplicate"] = {
             "passed": False,
             "first_document_id": semantic_duplicate.get("first_document_id"),
             "same_total": same_total,
+            "claim_state": state,
         }
-        if same_total:
+        # A claim that is still PENDING or awaiting review is not proof of a duplicate yet, so it
+        # blocks auto-approval instead of rejecting outright.
+        if state != "FINAL":
+            reasons.append(
+                "Another invoice with the same vendor and invoice number is still being processed."
+            )
+        elif same_total:
             return InvoiceDecision(
                 status=DecisionStatus.REJECTED,
                 reasons=["Duplicate vendor and invoice number already processed."],
@@ -132,7 +175,8 @@ def evaluate_decision(
                 match_confidence=match.score,
                 rule_checks=checks,
             )
-        reasons.append("Invoice number was seen before for this vendor, but the amount differs.")
+        else:
+            reasons.append("Invoice number was seen before for this vendor, but the amount differs.")
     else:
         checks["semantic_duplicate"] = {"passed": True}
 
