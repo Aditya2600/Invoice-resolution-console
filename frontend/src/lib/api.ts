@@ -137,6 +137,7 @@ export const api = {
   importPurchaseOrders: (file: File) => upload<ImportPurchaseOrdersResponse>("/purchase-orders/import", file),
   seedPurchaseOrders: () =>
     request<ImportPurchaseOrdersResponse>("/demo/seed-purchase-orders", { method: "POST" }),
+  resetDemo: () => request<{ message: string }>("/demo/reset", { method: "POST" }),
   openDocument: async (documentId: string) => {
     let response: Response;
     try {

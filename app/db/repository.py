@@ -30,6 +30,21 @@ def _json(value: Any) -> Jsonb:
     return Jsonb(value, dumps=lambda object_: json.dumps(object_, default=default))
 
 
+def reset_demo_data() -> None:
+    """Truncate every invoice/PO table. Demo-only, never call in production."""
+    with connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                TRUNCATE invoice_events, invoice_review_actions, po_invoice_allocations,
+                    invoice_duplicates, invoice_identity_claims, invoice_results,
+                    invoice_jobs, invoice_documents, purchase_orders
+                RESTART IDENTITY CASCADE
+                """
+            )
+        conn.commit()
+
+
 def create_document_and_job(
     *,
     file_name: str,

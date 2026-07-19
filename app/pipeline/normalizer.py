@@ -10,10 +10,28 @@ from dateutil import parser as date_parser
 from app.core.schemas import Evidence, InvoiceExtraction
 
 
+_LEGAL_SUFFIX_RE = re.compile(
+    r"\b(private limited|pvt ltd|limited|ltd|llp|llc|inc)\.?\s*$"
+)
+
+
 def normalize_name(value: str | None) -> str:
+    """Normalize a vendor name for exact comparison (never fuzzy matching).
+
+    Strips case, punctuation, repeated whitespace, and common legal
+    suffixes (Pvt Ltd, Private Limited, Ltd, Limited, LLP, Inc, LLC) so
+    'BluePeak Office Supplies' matches 'BluePeak Office Supplies Pvt Ltd'.
+    """
     if not value:
         return ""
-    return re.sub(r"[^a-z0-9]", "", value.lower())
+    text = re.sub(r"[^a-z0-9\s]", " ", value.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    while True:
+        stripped = _LEGAL_SUFFIX_RE.sub("", text).strip()
+        if stripped == text:
+            break
+        text = stripped
+    return re.sub(r"[^a-z0-9]", "", text)
 
 
 def normalize_invoice_number(value: str | None) -> str:

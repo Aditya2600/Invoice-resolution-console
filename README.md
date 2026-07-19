@@ -8,7 +8,7 @@ The console accepts a real invoice PDF, matches it against a real purchase-order
 - `NEEDS_REVIEW`
 - `REJECTED`
 
-It uses MEDHA (Gemma 4 26B served through vLLM) for structured extraction when configured, while keeping PO matching and finance decisions deterministic in Python. A human reviewer can resolve `NEEDS_REVIEW` invoices from the dashboard; that resolution re-runs the same deterministic policy engine instead of trusting a free-form human verdict.
+It uses MEDHA—the served name for `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit`, running behind an OpenAI-compatible vLLM endpoint—for structured extraction when configured. PO matching and finance decisions remain deterministic in Python. A human reviewer can resolve `NEEDS_REVIEW` invoices from the dashboard; that resolution re-runs the same deterministic policy engine instead of trusting a free-form human verdict.
 
 ## Why this architecture
 
@@ -21,43 +21,67 @@ It uses MEDHA (Gemma 4 26B served through vLLM) for structured extraction when c
 - Every decision stores a frozen `policy_snapshot` + `policy_hash` of the vendor rule values it was judged under, so a later change to `vendor_rules.json` can never rewrite history.
 - A vendor+invoice-number "identity claim" has its own lifecycle (`PENDING → FINAL` / `RELEASED`), decoupled from the job's own status, so failed/rejected runs release the identity for a corrected re-upload instead of blocking it forever.
 
-## Architecture (components)
+## Architecture
 
 ```text
-┌───────────────────────────┐        ┌──────────────────────────────┐
-│   Frontend (React/Vite)   │        │        MEDHA (vLLM)           │
-│  Dashboard · Process ·    │        │  OpenAI-compatible endpoint   │
-│  Run Detail · Settings    │        │  page images + raw text -> JSON│
-└─────────────┬─────────────┘        └───────────────▲────────────────┘
-              │ HTTP (fetch)                          │ HTTPS
-              ▼                                        │
-┌───────────────────────────────────────────────────────────────────┐
-│                      FastAPI app  (app/api/routes.py)              │
-│  /purchase-orders/import   /invoices/upload   /jobs   /jobs/{id}   │
-│  /jobs/{id}/review/*       /jobs/{id}/retry   /documents/{id}/file │
-└─────────────┬───────────────────────────────────────┬──────────────┘
-              │ writes document + PENDING job          │ reads job/events/result
-              ▼                                        │
-┌───────────────────────────────────────────────────────────────────┐
-│                          PostgreSQL                                │
-│  invoice_documents · invoice_jobs (durable queue) · invoice_events │
-│  purchase_orders · po_invoice_allocations · invoice_results        │
-│  invoice_identity_claims · invoice_review_actions                  │
-└─────────────▲───────────────────────────────────────────────────────┘
-              │ FOR UPDATE SKIP LOCKED claim + lease
-              │
-┌─────────────┴─────────────────────────────────────────────────────┐
-│                  Worker  (app/worker.py, polling loop)             │
-│      app/pipeline/orchestrator.py -> process_job(job)               │
-│                                                                      │
-│  services/pdf.py        services/medha.py       pipeline/decision.py│
-│  PyMuPDF text +          MEDHA client /           vendor rules,     │
-│  page render + optional  chat/completions         PO matching,      │
-│  PaddleOCR fallback                                policy verdict    │
-└───────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│ React / Vite frontend                                               │
+│ Dashboard · Upload · Live run · Review · Settings                   │
+│ Authenticated actor · TanStack Query polling · protected PDF preview│
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │ HTTPS / JSON
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ FastAPI application                                                 │
+│ Auth + RBAC · secure PDF intake · jobs · review · retry · documents │
+│ operations overview · Prometheus exposition · request correlation   │
+└──────────────────────┬──────────────────────────┬───────────────────┘
+                       │ SQL                      │ validated files
+                       ▼                          ▼
+┌──────────────────────────────────┐   ┌─────────────────────────────┐
+│ PostgreSQL                       │   │ Managed local storage       │
+│                                  │   │ Quarantine → validated PDF  │
+│ invoice_documents                │   │ Server-generated keys only  │
+│ invoice_jobs (durable queue)     │   └──────────────┬──────────────┘
+│ invoice_events (append-only)     │                  │ PDF/pages
+│ purchase_orders                  │                  │
+│ po_invoice_allocations           │                  │
+│ invoice_results                  │                  │
+│ invoice_identity_claims          │                  │
+│ invoice_review_actions           │                  │
+└──────────────────┬───────────────┘                  │
+                   │ `FOR UPDATE SKIP LOCKED`         │
+                   │ claim + lease                    │
+                   ▼                                  ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ Durable worker                                                      │
+│ process_job() · stage events · retry/lease recovery                 │
+│ PyMuPDF native text/rendering · optional PaddleOCR · MEDHA client   │
+│ deterministic PO matching/policy · atomic financial finalization    │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │ OpenAI-compatible HTTPS
+                                ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│ MEDHA / vLLM                                                        │
+│ `cyankiwi/gemma-4-26B-A4B-it-AWQ-4bit` served as `Medha`            │
+│ Text + page images → schema-constrained extraction JSON             │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 Filesystem storage (`storage/`) holds the uploaded PDF bytes and rendered page-image artifacts; only the storage key is kept in Postgres.
+
+### Ownership and safety boundaries
+
+| Concern | Source of truth | Safety property |
+|---|---|---|
+| Work scheduling | `invoice_jobs` | Leased `SKIP LOCKED` claims allow concurrent workers and crash recovery |
+| Pipeline history | `invoice_events` | Append-only events drive the live run and preserve stage evidence |
+| Final outcome | `invoice_results` | Stores immutable model extraction plus the frozen policy snapshot/hash |
+| PO consumption | `po_invoice_allocations` + `purchase_orders.consumed_amount` | Allocation, result, job closure, claim settlement, and audit events commit together |
+| Business duplicate ownership | `invoice_identity_claims` | Partial uniqueness permits one live `PENDING`/`FINAL` vendor-invoice identity |
+| Human actions | `invoice_review_actions` | Server-derived actor, corrections, note, and before/after decision remain auditable |
+| Operations dashboard | PostgreSQL aggregates | Cross-process queue, decision, provider, and latency truth |
+| Service telemetry | Per-process `/metrics` + structured logs | Low-cardinality metrics and `X-Request-ID` correlation without invoice PII labels |
 
 ## Processing flow (one invoice, start to finish)
 
@@ -106,8 +130,10 @@ Filesystem storage (`storage/`) holds the uploaded PDF bytes and rendered page-i
               │                   - write stage_policy_validate + invoice_closed events
               ▼
 12. Dashboard shows live stage timeline, evidence, rule checks, and final outcome.
-        If NEEDS_REVIEW: reviewer approves (re-runs evaluate_decision under the
-        reviewer's PO choice/corrections) or rejects — never a free-form verdict.
+        If NEEDS_REVIEW: reviewer selects a PO and/or supplies corrections;
+        the server builds effective_extraction and re-runs evaluate_decision
+        under the frozen policy snapshot. Attestation bypasses only the confidence
+        gate; all financial and duplicate checks still run.
         If FAILED: an operator can retry, which re-queues under a new retry_generation.
 ```
 
@@ -118,6 +144,7 @@ app/
   api/routes.py            FastAPI endpoints
   core/config.py           pydantic-settings environment config
   core/schemas.py          Pydantic models (extraction, decision, requests)
+  core/observability.py    bounded metrics, structured logs, request correlation
   db/pg.py                 connection pool + schema DDL (idempotent, run on startup)
   db/repository.py         all SQL: queue claim, finalize transaction, identity claims, retry
   pipeline/normalizer.py   name/invoice-number normalization, heuristic fallback extraction
@@ -227,10 +254,10 @@ All money values use Python `Decimal`. When an invoice is approved (by the pipel
 
 A `NEEDS_REVIEW` job is resolved from the Run Detail page (`ReviewPanel`), never by hand-writing an outcome:
 
-- **Approve**: reviewer optionally selects a PO and/or corrects extracted fields; the server re-runs `evaluate_decision` with `extraction_confidence` attested at `1.0` and the reviewer's inputs. If it still fails a check (closed PO, insufficient balance, currency mismatch...), the API returns `422` and nothing is written.
+- **Approve**: the reviewer may select a PO and/or correct extracted fields. The server builds an `effective_extraction` and re-runs `evaluate_decision` using the invoice's frozen `policy_snapshot`. Reviewer attestation bypasses only the low-confidence gate; the model's original confidence is preserved unchanged. PO status, currency, arithmetic, remaining balance, and duplicate-identity checks still apply. If validation still fails, the API returns `422` and the resolution is not committed.
 - **Reject**: always allowed with a note; releases the identity claim so a corrected re-upload can be processed.
 - A job that is no longer `NEEDS_REVIEW` (already resolved, or resolved concurrently by someone else) returns `409` — resolutions are not idempotent replays.
-- The original model extraction in `invoice_results` is never overwritten; corrections are stored only on the `invoice_review_actions` audit row.
+- The original model extraction in `invoice_results` is never overwritten. Corrections are stored in `invoice_review_actions.corrections`, included in the append-only `stage_review_resolve` audit event, and exposed through `effective_extraction` when reading job details.
 - The reviewer and retry actor are derived from the authenticated identity. Compatibility fields such as `reviewer_name` and `requested_by` in request bodies are ignored.
 
 ## Authentication and secure intake
@@ -248,6 +275,13 @@ Invoice uploads are streamed to an OS quarantine file while hashing. The server 
 
 PDFs are available only through the authenticated document API. Responses use private/no-store caching, content sniffing protection, a safe server-sanitized download name, and sandbox-oriented headers.
 
+## Observability
+
+- `GET /metrics` exposes bounded, low-cardinality Prometheus metrics for HTTP requests, pipeline stages, decisions, failures, OCR usage, and MEDHA calls.
+- `GET /api/ops/overview?window_hours=24` returns PostgreSQL-backed operational aggregates including queue state, review backlog, decision mix, p50/p95 latency, OCR fallback rate, provider health, and top failures.
+- Logs are emitted as structured JSON and correlated using `X-Request-ID`.
+- Prometheus metrics are per process; the PostgreSQL-backed operations overview is the cross-process source of truth.
+
 ## API endpoints
 
 | Endpoint | Purpose |
@@ -262,8 +296,12 @@ PDFs are available only through the authenticated document API. Responses use pr
 | `POST /api/jobs/{job_id}/retry` | Re-queue a `FAILED` job (409 otherwise) |
 | `GET /api/documents/{document_id}/file` | Original PDF |
 | `POST /api/demo/seed-purchase-orders` | Seed `data/purchase_orders.csv` if present |
+| `GET /api/ops/overview` | Operational queue, reliability, provider, and latency aggregates |
+| `GET /metrics` | Prometheus text exposition for the current process |
 
 ## Test
+
+Current verified baseline: **57 passing backend tests** and a clean frontend production build.
 
 Fast, DB-independent tests (decision policy, normalizer):
 
@@ -277,6 +315,14 @@ Full suite, including transactional integrity tests against a real Postgres (ski
 python -m pytest
 ```
 
+Frontend production build:
+
+```bash
+cd frontend
+npm ci
+npm run build
+```
+
 Coverage:
 
 | File | What it proves |
@@ -287,15 +333,26 @@ Coverage:
 | `test_identity.py` | Identity-claim lifecycle: failure releases it, review keeps it pending, rejection releases it, approval finalizes it, a released identity can be reclaimed, a second worker cannot steal a live claim |
 | `test_review.py` | Reviewer approval/rejection, double-resolution conflict (409), balance-exceeding approval refused, corrections never overwrite the stored model extraction |
 | `test_retry.py` | Only `FAILED` jobs retry, a `NEEDS_REVIEW` job cannot, a retry cannot double-consume an allocation, policy snapshots survive later `vendor_rules.json` changes |
+| `test_corrections.py` | Correction validation, immutable model extraction, effective extraction, identity migration, and approval re-evaluation |
+| `test_observability.py` | Bounded metric labels, redaction, aggregate windows, OCR fallback, MEDHA outcomes, and friendly-stage timing |
+| `test_security.py` | Development/JWT authentication, RBAC, upload limits, PDF validation, traversal protection, protected PDF access, actor derivation, and log redaction |
 
 ## Demo script
 
 1. Seed the happy-path PO master (`data/sample_invoices/Happy-path PDFs/happy_path_purchase_orders.csv`).
 2. Upload the four `Happy-path PDFs/*.pdf` invoices; each should extract cleanly and reach `APPROVED` against its matching PO.
-3. Upload `Happy-path PDFs/semantic_duplicate_invoice.pdf` (same vendor + invoice number as an already-approved one) → `REJECTED` with a duplicate-identity reason.
-4. Switch to `Edge-Case PDFs/`, seed `realistic_purchase_order_master_matching_edge_cases.csv`, and upload:
+3. Upload `Edge-Case PDFs/semantic_duplicate_invoice.pdf` (same vendor + invoice number as an already-approved one) → `REJECTED` with a duplicate-identity reason.
+4. Seed `Edge-Case PDFs/realistic_purchase_order_master.csv`, then upload:
    - `po_balance_exhausted_invoice.pdf` → `NEEDS_REVIEW`, remaining PO balance insufficient.
    - `ambiguous_po_match_invoice.pdf` → `NEEDS_REVIEW`, multiple open POs match the vendor; resolve it from the Run Detail review panel by picking a PO.
    - `low_quality_scanned_invoice.pdf` → exercises the OCR/page-image fallback path.
-5. Fail a job (e.g. stop MEDHA mid-run or use an unreadable file) and retry it from the dashboard to show the retry-generation audit trail.
+5. Demonstrate retry by inducing a worker-stage failure after a valid PDF has been accepted—for example, temporarily make the configured MEDHA endpoint unavailable when fallback is disabled—then restore the dependency and retry the `FAILED` job.
 6. Explain that model output is validated and every policy decision is deterministic, reproducible from the stored `policy_snapshot`/`policy_hash`, and reviewer resolutions re-run the same policy engine rather than trusting a free-form human verdict.
+
+## Deliberate trade-offs and boundaries
+
+- PostgreSQL is sufficient as the durable queue for this workload and keeps queue state, leases, results, and financial locking in one transactional system. A separate broker would become useful only at substantially higher throughput or with multiple workflow types.
+- Local filesystem storage keeps the take-home runnable. A multi-host production deployment should replace it with private object storage while retaining server-generated keys and authenticated access.
+- Secure intake performs strict format and resource validation, but it is not antivirus scanning. A production deployment can add a quarantine scanner before promoting a file to managed storage.
+- MEDHA and PaddleOCR improve extraction quality; deterministic policy evaluation remains the decision authority. Heuristic extraction keeps text-based demo invoices runnable when model access is unavailable.
+- Development identity exists only for local demonstration. Non-development deployments are guarded to require JWT authentication.

@@ -13,7 +13,7 @@ from app.core.schemas import RetryRequest, ReviewResolveRequest
 from app.db import repository
 from app.pipeline import review
 from app.services.pdf import PdfValidationError, inspect_pdf
-from app.services.storage import UploadTooLarge, commit_quarantined_pdf, file_path, quarantine_upload
+from app.services.storage import UploadTooLarge, commit_quarantined_pdf, file_path, quarantine_upload, reset_storage
 
 
 router = APIRouter(prefix="/api")
@@ -239,3 +239,12 @@ def download_document(
 def seed_purchase_orders(_: Annotated[Actor, Depends(admin_access)]) -> dict:
     data_path = Path(__file__).resolve().parents[2] / "data" / "purchase_orders.csv"
     return {"message": "Sample purchase orders imported.", **repository.import_purchase_orders(data_path.read_bytes())}
+
+
+@router.post("/demo/reset")
+def reset_demo(_: Annotated[Actor, Depends(admin_access)]) -> dict:
+    if get_settings().environment == "production":
+        raise HTTPException(status_code=403, detail="Demo reset is disabled in production.")
+    repository.reset_demo_data()
+    reset_storage()
+    return {"message": "Demo data reset."}

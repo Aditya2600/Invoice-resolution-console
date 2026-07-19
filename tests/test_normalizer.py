@@ -22,8 +22,26 @@ def test_heuristic_extracts_common_invoice_fields() -> None:
 
 
 def test_normalization_is_stable() -> None:
-    assert normalize_name("Acme Supplies Pvt. Ltd") == "acmesuppliespvtltd"
+    assert normalize_name("Acme Supplies Pvt. Ltd") == "acmesupplies"
     assert normalize_invoice_number("acm / 100-2") == "ACM1002"
+
+
+def test_normalize_name_strips_legal_suffixes_for_matching() -> None:
+    assert normalize_name("BluePeak Office Supplies") == normalize_name(
+        "BluePeak Office Supplies Pvt Ltd"
+    )
+    assert normalize_name("Stellar IT Services") == normalize_name(
+        "Stellar IT Services Private Limited"
+    )
+
+
+def test_normalize_name_does_not_collapse_different_vendors() -> None:
+    assert normalize_name("BluePeak Office Supplies") != normalize_name(
+        "GreenPeak Office Supplies Pvt Ltd"
+    )
+    assert normalize_name("Stellar IT Services") != normalize_name(
+        "Stellar Software Services Private Limited"
+    )
 
 
 def test_model_json_allows_fences() -> None:

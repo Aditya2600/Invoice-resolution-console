@@ -1,13 +1,32 @@
-import { Check, Lock, Minus } from "lucide-react";
+import { useState } from "react";
+import { Check, Lock, Minus, RotateCcw } from "lucide-react";
+import { toast } from "sonner";
 
-import { API_BASE_URL } from "@/lib/api";
+import { api, API_BASE_URL, ApiError } from "@/lib/api";
 import { formatPercent } from "@/lib/format";
+import { Button } from "@/components/ui/button";
 import type { VendorRule } from "@/lib/types";
 import rules from "@/data/vendor-rules.json";
 
 const vendorRules = rules as Record<string, VendorRule>;
 
 export function Settings() {
+  const [resetting, setResetting] = useState(false);
+
+  async function handleReset() {
+    if (!window.confirm("Delete every job, document, and PO in this environment? Cannot be undone.")) return;
+    setResetting(true);
+    try {
+      await api.resetDemo();
+      toast.success("Demo data reset.");
+      window.location.reload();
+    } catch (error) {
+      toast.error(error instanceof ApiError ? error.message : "Reset failed.");
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-5 md:px-8 py-10">
       <div className="mono-label text-muted-foreground">POLICY · READ-ONLY</div>
@@ -73,6 +92,17 @@ export function Settings() {
             </div>
           </div>
         </div>
+      </section>
+
+      <section className="mt-10 rounded-2xl border border-divider bg-background p-6 md:p-8">
+        <div className="mono-label text-muted-foreground">DEMO TOOLS</div>
+        <p className="mt-2 max-w-2xl text-foreground/70 text-sm">
+          Wipes every job, document, and purchase order in this environment. For recording clean demo takes only.
+        </p>
+        <Button variant="destructive" className="mt-4" disabled={resetting} onClick={handleReset}>
+          <RotateCcw className="size-4" aria-hidden />
+          {resetting ? "Resetting…" : "Reset demo data"}
+        </Button>
       </section>
     </div>
   );
